@@ -51,10 +51,28 @@ pnpm install
 ## Infraestructura local
 
 ```bash
+# Arrancar PostgreSQL y Redis en background
 docker compose up -d
+
+# Ver estado y healthchecks
+docker compose ps
+
+# Parar servicios (conserva datos)
+docker compose stop
+
+# Parar y eliminar contenedores (conserva volúmenes)
+docker compose down
+
+# ⚠️ Elimina contenedores Y volúmenes — se pierden todos los datos locales
+docker compose down -v
 ```
 
-Levanta PostgreSQL en `:5432` y Redis en `:6379`.
+| Servicio    | Puerto |
+|-------------|--------|
+| PostgreSQL  | 5432   |
+| Redis       | 6379   |
+
+Copia `.env.example` a `.env` y rellena las variables antes de arrancar las apps.
 
 ## Desarrollo
 
