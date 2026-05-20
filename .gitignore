@@ -1,0 +1,35 @@
+# dependencies
+node_modules
+.pnpm-store
+
+# build
+dist
+build
+out
+.next
+.turbo
+
+# env
+.env
+.env.local
+.env.*.local
+
+# coverage
+coverage
+
+# OS
+.DS_Store
+Thumbs.db
+
+# logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+
+# IDE
+.idea
+.vscode/settings.json
+
+# prisma
+*.db
+*.db-journal
