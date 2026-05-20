@@ -86,6 +86,29 @@ pnpm dev
 | admin | http://localhost:3001    |
 | api   | http://localhost:4000    |
 
+## Base de datos
+
+**Desarrollo local** usa PostgreSQL en Docker (puerto 5432).  
+**Staging / producción** puede usar Supabase PostgreSQL.
+
+Copia `.env.example` a `.env` y configura `DATABASE_URL` y `DIRECT_URL`:
+
+| Entorno | `DATABASE_URL` | `DIRECT_URL` |
+|---|---|---|
+| Local | `postgresql://user:pass@localhost:5432/morer_dev` | igual que DATABASE_URL |
+| Supabase | pooler `:6543` | conexión directa `:5432` |
+
+> `SUPABASE_SERVICE_ROLE_KEY` nunca debe usarse en el frontend.
+
+```bash
+pnpm db:generate      # Genera el cliente Prisma
+pnpm db:migrate       # Crea y aplica migraciones (desarrollo)
+pnpm db:seed          # Carga datos de prueba
+pnpm db:studio        # Abre Prisma Studio en http://localhost:5555
+pnpm db:reset         # Borra todo y re-aplica migraciones + seed
+pnpm db:migrate:deploy # Aplica migraciones en staging/producción
+```
+
 ## Comandos útiles
 
 ```bash

@@ -1,0 +1,270 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider  = "postgresql"
+  url       = env("DATABASE_URL")
+  directUrl = env("DIRECT_URL")
+}
+
+// ─── Enums ────────────────────────────────────────────────────────────────────
+
+enum ProductStatus {
+  ACTIVE
+  DRAFT
+  ARCHIVED
+}
+
+enum CartStatus {
+  ACTIVE
+  ABANDONED
+  CONVERTED
+  EXPIRED
+}
+
+enum OrderStatus {
+  PENDING_PAYMENT
+  PAID
+  FULFILLED
+  CANCELLED
+  REFUNDED
+  PARTIALLY_REFUNDED
+  RETURNED
+  EXCHANGED
+}
+
+enum PaymentStatus {
+  PENDING
+  SUCCEEDED
+  FAILED
+  REFUNDED
+  PARTIALLY_REFUNDED
+}
+
+enum AutomationJobStatus {
+  PENDING
+  PROCESSING
+  COMPLETED
+  FAILED
+  SKIPPED
+}
+
+enum AdminRole {
+  ADMIN
+  OPERATIONS
+  MARKETING
+  SUPPORT
+  DEVELOPER
+}
+
+enum EmailSubscriptionStatus {
+  ACTIVE
+  UNSUBSCRIBED
+  BOUNCED
+}
+
+// ─── Models ───────────────────────────────────────────────────────────────────
+
+// Stock no se guarda en Product ni en ProductVariant.
+// El stock real vive en Inventory: stockQuantity - reservedQuantity = disponible.
+
+model Product {
+  id             String        @id @default(uuid())
+  name           String
+  slug           String        @unique
+  description    String?
+  seoTitle       String?
+  seoDescription String?
+  status         ProductStatus @default(DRAFT)
+  createdAt      DateTime      @default(now())
+  updatedAt      DateTime      @updatedAt
+
+  variants ProductVariant[]
+
+  @@map("products")
+}
+
+model ProductVariant {
+  id                    String        @id @default(uuid())
+  productId             String
+  product               Product       @relation(fields: [productId], references: [id])
+  size                  String
+  sku                   String        @unique
+  priceInCents          Int
+  compareAtPriceInCents Int?
+  status                ProductStatus @default(ACTIVE)
+  deletedAt             DateTime?
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  inventory  Inventory?
+  cartItems  CartItem[]
+  orderItems OrderItem[]
+
+  @@map("product_variants")
+}
+
+// 1:1 con ProductVariant. availableStock = stockQuantity - reservedQuantity (calculado, no almacenado).
+model Inventory {
+  id               String         @id @default(uuid())
+  variantId        String         @unique
+  variant          ProductVariant @relation(fields: [variantId], references: [id])
+  stockQuantity    Int            @default(0)
+  reservedQuantity Int            @default(0)
+  createdAt        DateTime       @default(now())
+  updatedAt        DateTime       @updatedAt
+
+  @@map("inventory")
+}
+
+model Customer {
+  id              String   @id @default(uuid())
+  email           String   @unique
+  emailNormalized String   @unique
+  firstName       String?
+  lastName        String?
+  phone           String?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  carts  Cart[]
+  orders Order[]
+
+  @@map("customers")
+}
+
+model Cart {
+  id         String     @id @default(uuid())
+  customerId String?
+  customer   Customer?  @relation(fields: [customerId], references: [id])
+  sessionId  String?
+  status     CartStatus @default(ACTIVE)
+  createdAt  DateTime   @default(now())
+  updatedAt  DateTime   @updatedAt
+
+  items CartItem[]
+
+  @@index([sessionId])
+  @@map("carts")
+}
+
+model CartItem {
+  id           String         @id @default(uuid())
+  cartId       String
+  cart         Cart           @relation(fields: [cartId], references: [id])
+  variantId    String
+  variant      ProductVariant @relation(fields: [variantId], references: [id])
+  quantity     Int
+  priceInCents Int
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@map("cart_items")
+}
+
+model Order {
+  id              String      @id @default(uuid())
+  orderNumber     String      @unique
+  customerId      String
+  customer        Customer    @relation(fields: [customerId], references: [id])
+  status          OrderStatus @default(PENDING_PAYMENT)
+  totalInCents    Int
+  shippingInCents Int         @default(0)
+  taxInCents      Int         @default(0)
+  shippingAddress Json?
+  createdAt       DateTime    @default(now())
+  updatedAt       DateTime    @updatedAt
+
+  items    OrderItem[]
+  payments Payment[]
+
+  @@map("orders")
+}
+
+// Snapshot de nombre, talla y precio en el momento del pedido para preservar histórico.
+// onDelete: Restrict impide borrar físicamente una variante con histórico de pedidos.
+model OrderItem {
+  id           String         @id @default(uuid())
+  orderId      String
+  order        Order          @relation(fields: [orderId], references: [id])
+  variantId    String
+  variant      ProductVariant @relation(fields: [variantId], references: [id], onDelete: Restrict)
+  productName  String
+  variantSize  String
+  quantity     Int
+  priceInCents Int
+  createdAt    DateTime       @default(now())
+  updatedAt    DateTime       @updatedAt
+
+  @@map("order_items")
+}
+
+model Payment {
+  id                    String        @id @default(uuid())
+  orderId               String
+  order                 Order         @relation(fields: [orderId], references: [id])
+  stripePaymentIntentId String        @unique
+  status                PaymentStatus @default(PENDING)
+  amountInCents         Int
+  currency              String        @default("eur")
+  createdAt             DateTime      @default(now())
+  updatedAt             DateTime      @updatedAt
+
+  @@map("payments")
+}
+
+// Append-only: los eventos no se modifican, solo se crean.
+model Event {
+  id         String   @id @default(uuid())
+  type       String
+  customerId String?
+  sessionId  String?
+  metadata   Json?
+  createdAt  DateTime @default(now())
+
+  @@index([type, createdAt])
+  @@map("events")
+}
+
+model EmailSubscription {
+  id               String                  @id @default(uuid())
+  email            String                  @unique
+  emailNormalized  String                  @unique
+  marketingConsent Boolean                 @default(false)
+  status           EmailSubscriptionStatus @default(ACTIVE)
+  source           String?
+  subscribedAt     DateTime?
+  unsubscribedAt   DateTime?
+  createdAt        DateTime                @default(now())
+  updatedAt        DateTime                @updatedAt
+
+  @@map("email_subscriptions")
+}
+
+model AutomationJob {
+  id          String              @id @default(uuid())
+  type        String
+  status      AutomationJobStatus @default(PENDING)
+  customerId  String?
+  orderId     String?
+  metadata    Json?
+  scheduledAt DateTime?
+  processedAt DateTime?
+  createdAt   DateTime            @default(now())
+  updatedAt   DateTime            @updatedAt
+
+  @@map("automation_jobs")
+}
+
+model AdminUser {
+  id              String    @id @default(uuid())
+  email           String    @unique
+  emailNormalized String    @unique
+  name            String
+  role            AdminRole @default(SUPPORT)
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  @@map("admin_users")
+}
