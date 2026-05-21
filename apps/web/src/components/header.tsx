@@ -1,0 +1,26 @@
+import Link from 'next/link';
+
+export function Header() {
+  return (
+    <header className="fixed top-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-sm border-b border-stone-200">
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
+        <div className="flex items-center justify-between h-16">
+          <Link
+            href="/"
+            className="text-lg font-bold tracking-[0.2em] text-stone-900 hover:text-stone-600 transition-colors"
+          >
+            MORER
+          </Link>
+          <nav className="flex items-center gap-8">
+            <Link
+              href="/shop"
+              className="text-sm text-stone-500 hover:text-stone-900 tracking-wide transition-colors"
+            >
+              Tienda
+            </Link>
+          </nav>
+        </div>
+      </div>
+    </header>
+  );
+}

@@ -109,6 +109,16 @@ pnpm db:reset         # Borra todo y re-aplica migraciones + seed
 pnpm db:migrate:deploy # Aplica migraciones en staging/producción
 ```
 
+## Variables de entorno — apps/web
+
+`apps/web` requiere las siguientes variables en `.env`:
+
+| Variable | Entorno | Descripción |
+|---|---|---|
+| `API_URL` | **Requerida en producción** | URL base de `apps/api`. Ej: `https://api.morer.com` |
+
+En desarrollo local, si `API_URL` no está definida, `apps/web` usa `http://localhost:4000` como fallback. En producción la ausencia de `API_URL` lanza un error explícito en el arranque.
+
 ## Comandos útiles
 
 ```bash
