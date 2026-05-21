@@ -9,31 +9,31 @@ const PRODUCTS = [
     name: 'Clara Boardshort',
     slug: 'clara-boardshort',
     description: 'Clara Boardshort — Mediterranean style boardshort.',
-    priceInCents: 8900,
+    priceInCents: 5500,
   },
   {
     name: 'Lluc Boardshort',
     slug: 'lluc-boardshort',
     description: 'Lluc Boardshort — Mediterranean style boardshort.',
-    priceInCents: 9500,
+    priceInCents: 5500,
   },
   {
     name: 'Mar Boardshort',
     slug: 'mar-boardshort',
     description: 'Mar Boardshort — Mediterranean style boardshort.',
-    priceInCents: 8500,
+    priceInCents: 5500,
   },
   {
     name: 'Pilar Boardshort',
     slug: 'pilar-boardshort',
     description: 'Pilar Boardshort — Mediterranean style boardshort.',
-    priceInCents: 9900,
+    priceInCents: 5500,
   },
   {
     name: 'Tomeu Boardshort',
     slug: 'tomeu-boardshort',
     description: 'Tomeu Boardshort — Mediterranean style boardshort.',
-    priceInCents: 8700,
+    priceInCents: 5500,
   },
 ];
 
@@ -41,40 +41,59 @@ async function main() {
   console.log('Seeding database...\n');
 
   for (const productData of PRODUCTS) {
-    const existing = await prisma.product.findUnique({
+    // Upsert product — create or update by slug
+    const product = await prisma.product.upsert({
       where: { slug: productData.slug },
-    });
-
-    if (existing) {
-      console.log(`⏭  ${productData.name} already exists, skipping.`);
-      continue;
-    }
-
-    const product = await prisma.product.create({
-      data: {
+      update: {
+        name: productData.name,
+        description: productData.description,
+        status: ProductStatus.ACTIVE,
+      },
+      create: {
         name: productData.name,
         slug: productData.slug,
         description: productData.description,
         status: ProductStatus.ACTIVE,
-        variants: {
-          create: SIZES.map((size) => ({
-            size,
-            sku: `${productData.slug}-${size.toLowerCase()}`,
-            priceInCents: productData.priceInCents,
-            status: ProductStatus.ACTIVE,
-            inventory: {
-              create: {
-                stockQuantity: 20,
-                reservedQuantity: 0,
-              },
-            },
-          })),
-        },
       },
-      include: { variants: true },
     });
 
-    console.log(`✓ ${product.name} (${product.variants.length} variants)`);
+    // Upsert each variant and its inventory — create or update by sku
+    for (const size of SIZES) {
+      const sku = `${productData.slug}-${size.toLowerCase()}`;
+
+      const variant = await prisma.productVariant.upsert({
+        where: { sku },
+        update: {
+          priceInCents: productData.priceInCents,
+          compareAtPriceInCents: null,
+          status: ProductStatus.ACTIVE,
+        },
+        create: {
+          productId: product.id,
+          size,
+          sku,
+          priceInCents: productData.priceInCents,
+          compareAtPriceInCents: null,
+          status: ProductStatus.ACTIVE,
+        },
+      });
+
+      // Upsert inventory — create or update by variantId
+      await prisma.inventory.upsert({
+        where: { variantId: variant.id },
+        update: {
+          stockQuantity: 20,
+          reservedQuantity: 0,
+        },
+        create: {
+          variantId: variant.id,
+          stockQuantity: 20,
+          reservedQuantity: 0,
+        },
+      });
+    }
+
+    console.log(`✓ ${productData.name}`);
   }
 
   console.log('\nSeed completed.');
