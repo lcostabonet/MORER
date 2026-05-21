@@ -3,7 +3,7 @@ import Link from 'next/link';
 import type { Metadata } from 'next';
 import { getProductBySlug, getProducts } from '@/lib/api';
 import { Price } from '@/components/price';
-import { SizeSelector } from '@/components/size-selector';
+import { ProductActions } from '@/components/product-actions';
 
 // Pre-generate known product pages at build time.
 // If the API is unavailable during build, returns [] — pages are then
@@ -36,8 +36,6 @@ export default async function ProductPage({ params }: PageProps) {
   const product = await getProductBySlug(slug);
 
   if (!product) notFound();
-
-  const hasAvailableSizes = product.variants.some((v) => v.isAvailable);
 
   return (
     <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-16">
@@ -72,24 +70,8 @@ export default async function ProductPage({ params }: PageProps) {
             <p className="text-stone-500 leading-relaxed text-sm">{product.description}</p>
           )}
 
-          {/* Size selector */}
-          <SizeSelector variants={product.variants} />
-
-          {/* CTA */}
-          <div className="pt-2">
-            <button
-              disabled
-              className="w-full bg-stone-900 text-white py-4 text-xs font-medium tracking-[0.2em] uppercase opacity-50 cursor-not-allowed"
-              aria-disabled="true"
-            >
-              {hasAvailableSizes ? 'Comprar ahora' : 'Agotado'}
-            </button>
-            {hasAvailableSizes && (
-              <p className="mt-3 text-xs text-stone-400 text-center">
-                El carrito estará disponible próximamente.
-              </p>
-            )}
-          </div>
+          {/* Size selector + add to cart */}
+          <ProductActions variants={product.variants} />
         </div>
       </div>
     </div>

@@ -113,11 +113,14 @@ pnpm db:migrate:deploy # Aplica migraciones en staging/producción
 
 `apps/web` requiere las siguientes variables en `.env`:
 
-| Variable | Entorno | Descripción |
-|---|---|---|
-| `API_URL` | **Requerida en producción** | URL base de `apps/api`. Ej: `https://api.morer.com` |
+| Variable | Prefijo | Entorno | Descripción |
+|---|---|---|---|
+| `API_URL` | server-only | **Requerida en producción** | Usada por Server Components para catálogo de productos |
+| `NEXT_PUBLIC_API_URL` | client+server | **Requerida en producción** | Usada por Client Components para operaciones de carrito |
 
-En desarrollo local, si `API_URL` no está definida, `apps/web` usa `http://localhost:4000` como fallback. En producción la ausencia de `API_URL` lanza un error explícito en el arranque.
+Ambas deben apuntar a la misma URL base de `apps/api` (ej: `https://api.morer.com`).
+
+En desarrollo local, si alguna falta, `apps/web` usa `http://localhost:4000` como fallback. En producción, la ausencia de cualquiera lanza un error explícito al arrancar o construir.
 
 ## Comandos útiles
 

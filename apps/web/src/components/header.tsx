@@ -18,6 +18,13 @@ export function Header() {
             >
               Tienda
             </Link>
+            <Link
+              href="/cart"
+              className="text-sm text-stone-500 hover:text-stone-900 tracking-wide transition-colors"
+              aria-label="Ver carrito"
+            >
+              Carrito
+            </Link>
           </nav>
         </div>
       </div>

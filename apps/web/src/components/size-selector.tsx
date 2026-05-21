@@ -5,9 +5,10 @@ import type { ProductVariant } from '@/types/product';
 
 interface SizeSelectorProps {
   variants: ProductVariant[];
+  onSelect?: (variantId: string | null) => void;
 }
 
-export function SizeSelector({ variants }: SizeSelectorProps) {
+export function SizeSelector({ variants, onSelect }: SizeSelectorProps) {
   const [selected, setSelected] = useState<string | null>(null);
 
   return (
@@ -23,7 +24,12 @@ export function SizeSelector({ variants }: SizeSelectorProps) {
           return (
             <button
               key={variant.id}
-              onClick={() => available && setSelected(variant.size)}
+              onClick={() => {
+                if (available) {
+                  setSelected(variant.size);
+                  onSelect?.(variant.id);
+                }
+              }}
               disabled={!available}
               aria-pressed={isSelected}
               aria-disabled={!available}
