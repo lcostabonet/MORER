@@ -4,6 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { getOrCreateSessionId } from '@/lib/session';
 import { getCartBySession, updateCartItem, removeCartItem } from '@/lib/cart-api';
+import { CheckoutButton } from './checkout-button';
 import type { CartResponse } from '@/types/cart';
 import { CartItemRow } from './cart-item-row';
 import { Price } from './price';
@@ -142,14 +143,7 @@ export function CartContent() {
             Gastos de envío e impuestos calculados en el siguiente paso.
           </p>
 
-          <button
-            disabled
-            className="w-full bg-stone-200 text-stone-400 py-4 text-xs font-medium tracking-[0.2em] uppercase cursor-not-allowed mb-3"
-            aria-disabled="true"
-          >
-            Finalizar compra
-          </button>
-          <p className="text-xs text-stone-400 text-center">Checkout disponible próximamente.</p>
+          <CheckoutButton cartId={cart.id} />
         </div>
       </div>
     </div>

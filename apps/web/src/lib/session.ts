@@ -9,3 +9,8 @@ export function getOrCreateSessionId(): string {
   }
   return id;
 }
+
+export function clearSessionId(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem(SESSION_KEY);
+}
