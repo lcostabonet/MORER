@@ -12,6 +12,7 @@ import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { PaymentsService } from './payments.service';
 import type { CreatePaymentIntentDto } from './dto/create-payment-intent.dto';
+import type { ReconcilePaymentDto } from './dto/reconcile-payment.dto';
 
 @Controller('payments')
 export class PaymentsController {
@@ -20,6 +21,12 @@ export class PaymentsController {
   @Post('create-intent')
   createIntent(@Body() body: CreatePaymentIntentDto) {
     return this.paymentsService.createPaymentIntent(body);
+  }
+
+  @Post('reconcile')
+  @HttpCode(200)
+  reconcile(@Body() body: ReconcilePaymentDto) {
+    return this.paymentsService.reconcilePayment(body);
   }
 
   @Post('webhook/stripe')

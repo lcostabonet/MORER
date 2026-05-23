@@ -13,3 +13,10 @@ export interface PaymentResponse {
   currency: string;
   createdAt: Date;
 }
+
+export interface ReconcileResponse {
+  reconciled: boolean;
+  alreadyPaid: boolean;
+  piStatus?: string;
+  status?: string;
+}
