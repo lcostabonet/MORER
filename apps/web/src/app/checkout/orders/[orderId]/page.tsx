@@ -106,9 +106,15 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
               <p className="text-sm font-medium text-green-800 mb-1">
                 Tu pago se ha confirmado correctamente
               </p>
-              <p className="text-sm text-green-700 leading-relaxed">
+              <p className="text-sm text-green-700 leading-relaxed mb-3">
                 Guarda esta página o el número de pedido para futuras consultas.
               </p>
+              <Link
+                href="/orders/lookup"
+                className="text-xs text-green-700 underline underline-offset-2 hover:text-green-900 transition-colors"
+              >
+                ¿Has perdido la URL? Consulta tu pedido
+              </Link>
             </div>
           )}
 

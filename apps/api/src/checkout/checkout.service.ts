@@ -6,8 +6,9 @@ import {
 } from '@nestjs/common';
 import { CartStatus, OrderStatus, Prisma, ProductStatus } from '@morer/database';
 import { PrismaService } from '../database/prisma.service';
-import type { OrderResponse } from './checkout.types';
+import type { OrderLookupResponse, OrderResponse } from './checkout.types';
 import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.dto';
+import type { LookupOrderDto } from './dto/lookup-order.dto';
 
 // ─── Design notes ─────────────────────────────────────────────────────────────
 //
@@ -340,6 +341,29 @@ export class CheckoutService {
       }
       throw err;
     }
+  }
+
+  // ─── Lookup order ─────────────────────────────────────────────────────────
+  // TODO: add rate limiting (5 req/min) once @nestjs/throttler is added to the project.
+
+  async lookupOrder(dto: LookupOrderDto): Promise<OrderLookupResponse> {
+    const orderNumber = typeof dto.orderNumber === 'string' ? dto.orderNumber.trim() : '';
+    if (!orderNumber) {
+      throw new BadRequestException('orderNumber must be a non-empty string');
+    }
+    assertEmail(dto.email);
+    const email = dto.email.trim().toLowerCase();
+
+    const order = await this.prisma.order.findFirst({
+      where: { orderNumber, email },
+      select: { id: true },
+    });
+
+    if (!order) {
+      throw new NotFoundException('No hemos encontrado ningún pedido con esos datos.');
+    }
+
+    return { orderId: order.id };
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────

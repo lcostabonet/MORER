@@ -18,3 +18,7 @@ export interface OrderResponse {
   items: OrderItemResponse[];
   createdAt: Date;
 }
+
+export interface OrderLookupResponse {
+  orderId: string;
+}

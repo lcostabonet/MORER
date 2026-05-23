@@ -38,3 +38,17 @@ export async function cancelCheckoutOrder(orderId: string): Promise<OrderRespons
   if (!res.ok) await parseError(res, 'Error al cancelar el pedido');
   return res.json() as Promise<OrderResponse>;
 }
+
+export async function lookupOrder(
+  orderNumber: string,
+  email: string,
+): Promise<{ orderId: string }> {
+  const res = await fetch(`${API_URL}/checkout/orders/lookup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ orderNumber, email }),
+  });
+  if (!res.ok)
+    await parseError(res, 'No hemos encontrado ningún pedido con esos datos.');
+  return res.json() as Promise<{ orderId: string }>;
+}
