@@ -27,6 +27,28 @@ export const metadata: Metadata = {
   description: 'Resumen de tu pedido.',
 };
 
+const STATUS_LABEL: Record<string, string> = {
+  PENDING_PAYMENT: 'Pendiente de pago',
+  PAID: 'Pagado',
+  CANCELLED: 'Cancelado',
+  FULFILLED: 'Completado',
+  REFUNDED: 'Reembolsado',
+  PARTIALLY_REFUNDED: 'Reembolso parcial',
+  RETURNED: 'Devuelto',
+  EXCHANGED: 'Cambiado',
+};
+
+const STATUS_COLOR: Record<string, string> = {
+  PAID: 'bg-green-50 text-green-700',
+  FULFILLED: 'bg-green-50 text-green-700',
+  PENDING_PAYMENT: 'bg-amber-50 text-amber-700',
+  CANCELLED: 'bg-stone-100 text-stone-500',
+  RETURNED: 'bg-stone-100 text-stone-500',
+  EXCHANGED: 'bg-stone-100 text-stone-500',
+  REFUNDED: 'bg-blue-50 text-blue-700',
+  PARTIALLY_REFUNDED: 'bg-blue-50 text-blue-700',
+};
+
 export default async function OrderPage({ params, searchParams }: PageProps) {
   const { orderId } = await params;
   const { redirect_status, payment_intent: paymentIntentId } = await searchParams;
@@ -43,7 +65,14 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
     if (isCancelled) return 'Pedido cancelado';
     if (isPending && returnedFromStripe) return 'Verificando pago...';
     if (isPending) return 'Completa tu pago';
-    return 'Tu pedido';
+    const titles: Record<string, string> = {
+      FULFILLED: 'Pedido completado',
+      REFUNDED: 'Pedido reembolsado',
+      PARTIALLY_REFUNDED: 'Pedido parcialmente reembolsado',
+      RETURNED: 'Pedido devuelto',
+      EXCHANGED: 'Pedido cambiado',
+    };
+    return titles[order.status] ?? 'Tu pedido';
   }
 
   return (
@@ -59,21 +88,26 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-14">
         {/* ── Left column ───────────────────────────────────────────── */}
         <div className="lg:col-span-2">
-          <h1 className="text-2xl sm:text-3xl font-bold text-stone-900 tracking-tight mb-2">
+          <h1 className="text-2xl sm:text-3xl font-bold text-stone-900 tracking-tight mb-3">
             {pageTitle()}
           </h1>
-          <p className="text-xs font-medium tracking-[0.15em] uppercase text-stone-400 mb-10">
-            {order.orderNumber}
-          </p>
+          <div className="mb-10">
+            <p className="text-xs font-medium tracking-[0.15em] uppercase text-stone-400 mb-1">
+              Número de pedido
+            </p>
+            <p className="text-sm font-medium text-stone-700 tracking-wide">
+              {order.orderNumber}
+            </p>
+          </div>
 
           {/* PAID — success banner */}
           {isPaid && (
             <div className="bg-green-50 border border-green-200 rounded-sm p-5 mb-10">
               <p className="text-sm font-medium text-green-800 mb-1">
-                Tu pedido ha sido confirmado
+                Tu pago se ha confirmado correctamente
               </p>
               <p className="text-sm text-green-700 leading-relaxed">
-                Recibirás más información sobre tu pedido próximamente.
+                Guarda esta página o el número de pedido para futuras consultas.
               </p>
             </div>
           )}
@@ -82,7 +116,7 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
           {isCancelled && (
             <div className="bg-stone-50 border border-stone-100 rounded-sm p-5 mb-10">
               <p className="text-sm text-stone-500 leading-relaxed">
-                La reserva de stock se ha liberado.
+                La reserva de stock se ha liberado. Puedes volver a comprar cuando quieras.
               </p>
             </div>
           )}
@@ -130,9 +164,12 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
           {/* PENDING — payment form (only when not returning from 3D Secure) */}
           {isPending && !returnedFromStripe && (
             <div className="pt-10 mt-2 border-t border-stone-100">
-              <h2 className="text-xs font-medium tracking-[0.2em] uppercase text-stone-400 mb-6">
+              <h2 className="text-xs font-medium tracking-[0.2em] uppercase text-stone-400 mb-2">
                 Método de pago
               </h2>
+              <p className="text-xs text-stone-400 leading-relaxed mb-6">
+                Tu carrito se ha convertido en pedido. Si decides no completar el pago, puedes cancelar el pedido y volver a comprar.
+              </p>
               <PaymentForm orderId={order.id} totalInCents={order.totalInCents} />
             </div>
           )}
@@ -148,23 +185,9 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
             {/* Status badge */}
             <div className="mb-6">
               <span
-                className={`inline-block text-xs font-medium tracking-[0.15em] uppercase px-3 py-1.5 rounded-sm ${
-                  isPaid
-                    ? 'bg-green-50 text-green-700'
-                    : isPending
-                      ? 'bg-amber-50 text-amber-700'
-                      : isCancelled
-                        ? 'bg-stone-100 text-stone-500'
-                        : 'bg-stone-100 text-stone-600'
-                }`}
+                className={`inline-block text-xs font-medium tracking-[0.15em] uppercase px-3 py-1.5 rounded-sm ${STATUS_COLOR[order.status] ?? 'bg-stone-100 text-stone-600'}`}
               >
-                {isPaid
-                  ? 'Pagado'
-                  : isPending
-                    ? 'Pendiente de pago'
-                    : isCancelled
-                      ? 'Cancelado'
-                      : order.status}
+                {STATUS_LABEL[order.status] ?? order.status}
               </span>
             </div>
 
@@ -176,8 +199,10 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
 
             <p className="text-xs text-stone-400 mb-8 leading-relaxed">
               {isPaid
-                ? 'Pago procesado correctamente.'
-                : 'Envío e impuestos calculados en el siguiente paso.'}
+                ? 'Pago procesado correctamente. Pedido confirmado.'
+                : isCancelled
+                  ? 'El pedido ha sido cancelado.'
+                  : 'Envío e impuestos calculados en el siguiente paso.'}
             </p>
 
             {/* Actions */}
