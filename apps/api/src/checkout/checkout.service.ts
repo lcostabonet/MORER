@@ -35,10 +35,17 @@ import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.
 const CURRENCY = 'EUR';
 const MAX_ORDER_NUMBER_RETRIES = 3;
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 function assertUuid(value: unknown, field: string): void {
   if (typeof value !== 'string' || !UUID_REGEX.test(value)) {
     throw new BadRequestException(`${field} must be a valid UUID`);
+  }
+}
+
+function assertEmail(value: unknown): void {
+  if (typeof value !== 'string' || value.trim() === '' || !EMAIL_REGEX.test(value.trim())) {
+    throw new BadRequestException('email must be a valid email address');
   }
 }
 
@@ -127,6 +134,7 @@ export class CheckoutService {
 
   async startCheckout(dto: CreateCheckoutFromCartDto): Promise<OrderResponse> {
     assertUuid(dto.cartId, 'cartId');
+    assertEmail(dto.email);
 
     for (let attempt = 1; attempt <= MAX_ORDER_NUMBER_RETRIES; attempt++) {
       try {
@@ -202,6 +210,7 @@ export class CheckoutService {
                 totalInCents,
                 shippingInCents: 0, // calculated at payment (Fase 8)
                 taxInCents: 0,      // calculated at payment (Fase 8)
+                email: dto.email.trim().toLowerCase(),
                 items: {
                   create: (cart.items as CartItemWithVariant[]).map((item) => ({
                     variantId: item.variantId,

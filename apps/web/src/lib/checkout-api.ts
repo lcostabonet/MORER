@@ -21,11 +21,11 @@ async function parseError(res: Response, fallback: string): Promise<never> {
   throw new Error(Array.isArray(msg) ? msg[0] : (msg ?? fallback));
 }
 
-export async function startCheckout(cartId: string): Promise<OrderResponse> {
+export async function startCheckout(cartId: string, email: string): Promise<OrderResponse> {
   const res = await fetch(`${API_URL}/checkout/from-cart`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cartId }),
+    body: JSON.stringify({ cartId, email }),
   });
   if (!res.ok) await parseError(res, 'Error al iniciar el checkout');
   return res.json() as Promise<OrderResponse>;
