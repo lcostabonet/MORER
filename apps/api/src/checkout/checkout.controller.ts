@@ -1,4 +1,5 @@
-import { Body, Controller, Get, HttpCode, Param, Post } from '@nestjs/common';
+import { Body, Controller, Get, HttpCode, Param, Post, UseGuards } from '@nestjs/common';
+import { ThrottlerGuard } from '@nestjs/throttler';
 import { CheckoutService } from './checkout.service';
 import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.dto';
 import type { LookupOrderDto } from './dto/lookup-order.dto';
@@ -14,6 +15,7 @@ export class CheckoutController {
 
   @Post('orders/lookup')
   @HttpCode(200)
+  @UseGuards(ThrottlerGuard)
   lookupOrder(@Body() body: LookupOrderDto) {
     return this.checkoutService.lookupOrder(body);
   }

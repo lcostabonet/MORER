@@ -16,6 +16,8 @@ function getCheckoutApiUrl(): string {
 const API_URL = getCheckoutApiUrl();
 
 async function parseError(res: Response, fallback: string): Promise<never> {
+  if (res.status === 429)
+    throw new Error('Demasiados intentos. Espera un minuto e inténtalo de nuevo.');
   const data = await res.json().catch(() => ({}));
   const msg = data.message as string | string[] | undefined;
   throw new Error(Array.isArray(msg) ? msg[0] : (msg ?? fallback));

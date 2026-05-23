@@ -344,7 +344,6 @@ export class CheckoutService {
   }
 
   // ─── Lookup order ─────────────────────────────────────────────────────────
-  // TODO: add rate limiting (5 req/min) once @nestjs/throttler is added to the project.
 
   async lookupOrder(dto: LookupOrderDto): Promise<OrderLookupResponse> {
     const orderNumber = typeof dto.orderNumber === 'string' ? dto.orderNumber.trim() : '';
