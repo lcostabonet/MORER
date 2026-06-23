@@ -8,6 +8,7 @@ import {
 import { OrderStatus, PaymentStatus, Prisma } from '@morer/database';
 import Stripe from 'stripe';
 import { PrismaService } from '../database/prisma.service';
+import { EmailService } from '../email/email.service';
 import type { CreatePaymentIntentDto } from './dto/create-payment-intent.dto';
 import type { ReconcilePaymentDto } from './dto/reconcile-payment.dto';
 import type {
@@ -46,7 +47,10 @@ function isSerializationError(err: unknown): boolean {
 export class PaymentsService {
   private readonly stripe: Stripe;
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly emailService: EmailService,
+  ) {
     const key = process.env.STRIPE_SECRET_KEY;
     if (!key) {
       throw new Error('STRIPE_SECRET_KEY is required for PaymentsModule');
@@ -410,6 +414,8 @@ export class PaymentsService {
 
     if (preCheck?.status === PaymentStatus.SUCCEEDED) {
       console.log(`[payments] Payment already processed: ${paymentIntent.id}`);
+      // Retry the confirmation email in case a previous attempt failed.
+      await this.emailService.sendOrderConfirmationIfNeeded(preCheck.orderId);
       return;
     }
 
@@ -439,6 +445,13 @@ export class PaymentsService {
     }
 
     await this.applyPaymentSuccess(paymentIntent.id);
+
+    // Send confirmation email. EmailService uses confirmationEmailSentAt for idempotency
+    // and catches all provider errors — payment status is never rolled back on email failure.
+    const orderId = preCheck?.orderId ?? (paymentIntent.metadata as Record<string, string>)?.orderId;
+    if (orderId) {
+      await this.emailService.sendOrderConfirmationIfNeeded(orderId);
+    }
   }
 
   // ─── payment_intent.payment_failed ────────────────────────────────────────
@@ -544,6 +557,9 @@ export class PaymentsService {
     }
 
     const applied = await this.applyPaymentSuccess(pi.id);
+    // Send confirmation email regardless of `applied` — EmailService uses
+    // confirmationEmailSentAt for idempotency, so duplicates are safe.
+    await this.emailService.sendOrderConfirmationIfNeeded(dto.orderId);
     console.log('[payments] reconcile: done — order PAID:', dto.orderId, '| applied by this call:', applied);
     // applied=false means a concurrent call (webhook or another reconcile) already did the work.
     return applied

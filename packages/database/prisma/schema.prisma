@@ -174,9 +174,10 @@ model Order {
   shippingInCents Int         @default(0)
   taxInCents      Int         @default(0)
   shippingAddress Json?
-  email           String?
-  createdAt       DateTime    @default(now())
-  updatedAt       DateTime    @updatedAt
+  email                   String?
+  confirmationEmailSentAt DateTime?
+  createdAt               DateTime    @default(now())
+  updatedAt               DateTime    @updatedAt
 
   items    OrderItem[]
   payments Payment[]
