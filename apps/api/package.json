@@ -7,7 +7,8 @@
     "build": "nest build",
     "start": "node dist/main",
     "lint": "eslint src --ext .ts",
-    "typecheck": "tsc --noEmit -p tsconfig.build.json"
+    "typecheck": "tsc --noEmit -p tsconfig.build.json",
+    "test": "vitest run"
   },
   "dependencies": {
     "@morer/database": "workspace:*",
@@ -27,6 +28,7 @@
     "@types/node": "^20.17.0",
     "ts-loader": "^9.5.2",
     "ts-node": "^10.9.2",
-    "typescript": "^5.5.4"
+    "typescript": "^5.5.4",
+    "vitest": "^4.1.9"
   }
 }
