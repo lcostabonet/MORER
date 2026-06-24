@@ -39,6 +39,14 @@ export type PrismaMock = {
     // Used by EmailService to mark confirmationEmailSentAt after a successful send.
     updateMany: ReturnType<typeof vi.fn>;
   };
+  customer: {
+    findUnique: ReturnType<typeof vi.fn>;
+    findUniqueOrThrow: ReturnType<typeof vi.fn>;
+    findFirst: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
+    update: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
+  };
   // The transactional client handed to $transaction callbacks. Exposed so tests
   // can assert/inspect the writes attempted inside a transaction.
   __tx: TxMock;
@@ -79,6 +87,14 @@ export function createPrismaMock(): PrismaMock {
     order: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
+      updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    customer: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      findUniqueOrThrow: vi.fn().mockResolvedValue(null),
+      findFirst: vi.fn().mockResolvedValue(null),
+      create: vi.fn().mockResolvedValue(null),
+      update: vi.fn().mockResolvedValue(null),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     __tx: tx,

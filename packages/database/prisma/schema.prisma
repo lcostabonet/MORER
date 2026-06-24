@@ -119,14 +119,16 @@ model Inventory {
 }
 
 model Customer {
-  id              String   @id @default(uuid())
-  email           String   @unique
-  emailNormalized String   @unique
+  id              String    @id @default(uuid())
+  email           String    @unique
+  emailNormalized String    @unique
   firstName       String?
   lastName        String?
   phone           String?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  passwordHash    String?
+  registeredAt    DateTime?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
   carts  Cart[]
   orders Order[]
