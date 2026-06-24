@@ -76,6 +76,7 @@ No inventes arquitectura ni cambies stack sin justificar. No crees tablas nuevas
 8 Checkout y pagos
 9 Pedidos
 10 Emails transaccionales  ← Phase 10A: order_confirmation IMPLEMENTADO & E2E VALIDADO (2026-06-24)
+                              Phase 10B: shipping_confirmation IMPLEMENTADO (2026-06-24) — POST /fulfillment/orders/:orderId/ship en localhost:4000
 11 Automatizaciones
 12 Drops
 13 MORER Club

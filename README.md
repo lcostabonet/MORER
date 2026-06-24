@@ -162,3 +162,25 @@ stripe listen --forward-to localhost:4000/<webhook-path> --events checkout.sessi
 ```
 
 **Estado (2026-06-24):** Phase 10A implementada y validada E2E — email de confirmación de pedido enviado via Resend al completarse el pago (`payment_intent.succeeded`), `confirmationEmailSentAt` guardado en DB.
+
+## E2E local — emails transaccionales (Phase 10B)
+
+Para validar el flujo completo de email de confirmación de envío:
+
+```bash
+# 1. Arrancar servicios
+docker compose up -d
+
+# 2. Aplicar migraciones pendientes
+pnpm db:migrate:deploy
+
+# 3. Arrancar servidor de desarrollo
+pnpm dev
+
+# 4. Marcar un pedido PAID como enviado (reemplaza <ORDER_ID> y el tracking real)
+curl -X POST http://localhost:4000/fulfillment/orders/<ORDER_ID>/ship \
+  -H "Content-Type: application/json" \
+  -d '{"trackingNumber":"GLS-ES-12345678","trackingUrl":"https://gls-group.com/track?id=GLS-ES-12345678"}'
+```
+
+**Estado (2026-06-24):** Phase 10B implementada — endpoint `POST /fulfillment/orders/:orderId/ship` marca el pedido como FULFILLED, guarda tracking y envía email de confirmación de envío via Resend (`shippingEmailSentAt` guardado en DB). Retry automático si el email falló en el primer intento.

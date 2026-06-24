@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ThrottlerModule } from '@nestjs/throttler';
 import { CartModule } from './cart';
 import { CheckoutModule } from './checkout';
+import { FulfillmentModule } from './fulfillment';
 import { HealthModule } from './health';
 import { PaymentsModule } from './payments';
 import { ProductsModule } from './products';
@@ -14,6 +15,7 @@ import { ProductsModule } from './products';
     CartModule,
     CheckoutModule,
     PaymentsModule,
+    FulfillmentModule,
   ],
 })
 export class AppModule {}

@@ -176,6 +176,10 @@ model Order {
   shippingAddress Json?
   email                   String?
   confirmationEmailSentAt DateTime?
+  trackingNumber          String?
+  trackingUrl             String?
+  shippingEmailSentAt     DateTime?
+  shippingEmailSendingAt  DateTime?
   createdAt               DateTime    @default(now())
   updatedAt               DateTime    @updatedAt
 
