@@ -122,6 +122,15 @@ Ambas deben apuntar a la misma URL base de `apps/api` (ej: `https://api.morer.co
 
 En desarrollo local, si alguna falta, `apps/web` usa `http://localhost:4000` como fallback. En producción, la ausencia de cualquiera lanza un error explícito al arrancar o construir.
 
+## Variables de entorno — apps/api (emails)
+
+| Variable | Descripción |
+|---|---|
+| `RESEND_API_KEY` | API key de Resend (obtener en resend.com, empieza por `re_`) |
+| `EMAIL_FROM` | Dirección remitente; usar `onboarding@resend.dev` en sandbox (sin verificación de dominio; solo entrega al propietario de la cuenta Resend) |
+
+> En producción: añadir un dominio verificado en el dashboard de Resend y actualizar `EMAIL_FROM`.
+
 ## Comandos útiles
 
 ```bash
@@ -131,3 +140,25 @@ pnpm lint        # Lint en todos los workspaces
 pnpm format      # Formatear con Prettier
 pnpm test        # Tests en todos los workspaces
 ```
+
+## E2E local — emails transaccionales (Phase 10A)
+
+Para validar el flujo completo de email de confirmación de pedido:
+
+```bash
+# 1. Arrancar servicios
+docker compose up -d
+
+# 2. Aplicar migraciones pendientes
+pnpm db:migrate:deploy
+
+# 3. Arrancar servidor de desarrollo
+pnpm dev
+
+# 4. En otra terminal, reenviar webhooks de Stripe al servidor local
+stripe listen --forward-to localhost:4000/<webhook-path> --events checkout.session.completed,payment_intent.succeeded
+
+# 5. Completar un checkout de prueba con tarjeta: 4242 4242 4242 4242
+```
+
+**Estado (2026-06-24):** Phase 10A implementada y validada E2E — email de confirmación de pedido enviado via Resend al completarse el pago (`payment_intent.succeeded`), `confirmationEmailSentAt` guardado en DB.

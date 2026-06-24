@@ -75,7 +75,7 @@ No inventes arquitectura ni cambies stack sin justificar. No crees tablas nuevas
 7 Carrito
 8 Checkout y pagos
 9 Pedidos
-10 Emails transaccionales
+10 Emails transaccionales  ← Phase 10A: order_confirmation IMPLEMENTADO & E2E VALIDADO (2026-06-24)
 11 Automatizaciones
 12 Drops
 13 MORER Club
@@ -146,6 +146,12 @@ MORER Club debe guardar: `email`, `email_normalized`, `marketing_consent`, `sour
 Usa React Email + Resend/Postmark. Emails mínimos: `welcome_01`, `abandoned_cart_01`, `order_confirmation`, `shipping_confirmation`, `review_request`, `ugc_request`, `drop_launch`, `back_in_stock`, `return_instructions`, `exchange_instructions`.
 
 Variables típicas: `customer.first_name`, `product.name`, `cart.recovery_url`, `order.number`, `order.tracking_url`, `drop.name`, `variant.size`.
+
+Variables de entorno requeridas en `apps/api`:
+- `RESEND_API_KEY` — API key de Resend (empieza por `re_`).
+- `EMAIL_FROM` — dirección remitente; `onboarding@resend.dev` en sandbox (entrega solo al propietario de la cuenta Resend). En producción, usar dominio verificado en Resend.
+
+`order_confirmation` implementado y validado E2E (2026-06-24): se envía via Resend al recibir `payment_intent.succeeded`, `confirmationEmailSentAt` se guarda en DB.
 
 ## Admin interno
 Usa roles y auditoría. Toda acción sensible debe dejar audit log: cambio de precio, edición de stock, creación de drop, cancelación de pedido, aprobación de review y aprobación de UGC.

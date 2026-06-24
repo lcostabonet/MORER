@@ -266,7 +266,7 @@ Emails mínimos:
 ```text
 welcome_01
 abandoned_cart_01
-order_confirmation
+order_confirmation           ← IMPLEMENTADO & E2E VALIDADO (2026-06-24)
 shipping_confirmation
 review_request
 ugc_request
@@ -281,6 +281,13 @@ Tecnología recomendada:
 ```text
 React Email + Resend/Postmark
 ```
+
+Variables de entorno requeridas (`apps/api`):
+
+| Variable | Descripción |
+|---|---|
+| `RESEND_API_KEY` | API key de Resend (resend.com, empieza por `re_`) |
+| `EMAIL_FROM` | Remitente; `onboarding@resend.dev` en sandbox — entrega solo al propietario de la cuenta Resend. En producción, usar dominio verificado. |
 
 ---
 
@@ -417,33 +424,32 @@ published
 
 ## 6. Estado actual del proyecto
 
-El proyecto está en fase de planificación técnica y definición de arquitectura.
+El proyecto está en desarrollo activo.
 
-Ya se han definido:
+Ya implementado y validado:
 
-- enfoque code-first;
-- uso de monorepo;
-- stack principal;
+- enfoque code-first y monorepo;
+- stack principal configurado;
 - arquitectura frontend/backend;
-- base de datos conceptual;
-- automatizaciones principales;
-- reglas para `CLAUDE.md`;
-- roadmap por secciones;
-- riesgos de base de datos;
-- mapa conceptual de arquitectura.
+- base de datos con Prisma y migraciones;
+- backend NestJS operativo;
+- checkout y pagos con Stripe (webhooks idempotentes);
+- gestión de pedidos;
+- **Phase 10A: email de confirmación de pedido via Resend — IMPLEMENTADO & E2E VALIDADO (2026-06-24)**
+  - Migración `20260623180000_add_order_confirmation_email_sent_at` aplicada.
+  - Webhook `payment_intent.succeeded` procesado correctamente (HTTP 200).
+  - Pedido actualizado a estado `paid`, email enviado, `confirmationEmailSentAt` guardado en DB.
+  - 45 tests pasan, typecheck y build limpios.
 
 Todavía falta implementar:
 
-- repositorio real;
-- configuración inicial;
-- base de datos;
-- API;
-- frontend;
-- carrito;
-- checkout;
-- admin;
-- automatizaciones;
-- despliegue.
+- admin completo;
+- automatizaciones (carrito abandonado, welcome flow, etc.);
+- drops y MORER Club;
+- reviews y UGC;
+- SEO técnico avanzado;
+- analítica de eventos;
+- despliegue a producción.
 
 ---
 
