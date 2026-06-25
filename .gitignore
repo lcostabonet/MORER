@@ -8,6 +8,7 @@ build
 out
 .next
 .turbo
+*.tsbuildinfo
 
 # env
 .env

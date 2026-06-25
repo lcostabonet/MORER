@@ -1,6 +1,17 @@
 import Link from 'next/link';
+import { cookies } from 'next/headers';
+import { getCurrentUser } from '@/lib/auth';
 
-export function Header() {
+export async function Header() {
+  let user = null;
+  try {
+    const cookieStore = await cookies();
+    user = await getCurrentUser(cookieStore);
+  } catch {
+    // API unreachable or cookie store unavailable — render unauthenticated header
+    user = null;
+  }
+
   return (
     <header className="fixed top-0 left-0 right-0 z-50 bg-white/95 backdrop-blur-sm border-b border-stone-200">
       <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8">
@@ -25,6 +36,22 @@ export function Header() {
             >
               Carrito
             </Link>
+            {user ? (
+              <Link
+                href="/account"
+                className="text-sm text-stone-500 hover:text-stone-900 tracking-wide transition-colors"
+                aria-label="Mi cuenta"
+              >
+                Mi cuenta
+              </Link>
+            ) : (
+              <Link
+                href="/login"
+                className="text-sm text-stone-500 hover:text-stone-900 tracking-wide transition-colors"
+              >
+                Iniciar sesión
+              </Link>
+            )}
           </nav>
         </div>
       </div>
