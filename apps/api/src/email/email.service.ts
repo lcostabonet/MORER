@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OrderStatus } from '@morer/database';
 import { Resend } from 'resend';
-import { renderOrderConfirmation, renderShippingConfirmation } from '@morer/emails';
+import { renderOrderConfirmation, renderShippingConfirmation, renderWelcome } from '@morer/emails';
 import { PrismaService } from '../database/prisma.service';
 
 const CURRENCY = 'EUR';
@@ -37,6 +37,17 @@ type OrderForShipping = {
     variantSize: string;
     quantity: number;
   }>;
+};
+
+// Minimal shape for the welcome email query.
+type CustomerForWelcome = {
+  id: string;
+  email: string;
+  firstName: string | null;
+  passwordHash: string | null;
+  registeredAt: Date | null;
+  welcomeEmailSentAt: Date | null;
+  welcomeEmailSendingAt: Date | null;
 };
 
 @Injectable()
@@ -269,6 +280,140 @@ export class EmailService {
       await this.prisma.order.updateMany({
         where: { id: orderId, shippingEmailSentAt: null, shippingEmailSendingAt: claimedAt },
         data: { shippingEmailSendingAt: null },
+      });
+    }
+  }
+
+  /**
+   * Sends the welcome email for a newly registered customer, if not already sent.
+   *
+   * Only sends to customers who have a passwordHash and registeredAt (i.e. real
+   * registered accounts, not anonymous checkout guests). Anonymous email addresses
+   * matching the "anon-" prefix or "@morer-checkout.local" domain are skipped.
+   *
+   * Uses the same atomic DB claim pattern as sendShippingConfirmationIfNeeded:
+   * only the caller whose updateMany wins (count === 1) proceeds to send. Stale
+   * claims older than 5 minutes are recovered to allow retry after a process crash.
+   *
+   * A failure from the email provider is logged but never rethrows — the customer
+   * registration status must remain unchanged regardless of email delivery.
+   * On any failure the claim is released (welcomeEmailSendingAt reset to null)
+   * so a future retry can reclaim it.
+   */
+  async sendWelcomeEmailIfNeeded(customerId: string): Promise<void> {
+    let customer: CustomerForWelcome | null;
+    try {
+      customer = await this.prisma.customer.findUnique({
+        where: { id: customerId },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          passwordHash: true,
+          registeredAt: true,
+          welcomeEmailSentAt: true,
+          welcomeEmailSendingAt: true,
+        },
+      }) as CustomerForWelcome | null;
+    } catch (err) {
+      console.error(`[email] Failed to load customer ${customerId} for welcome email:`, err);
+      return;
+    }
+
+    // Pre-send guards (cheap reads, no DB write)
+    if (!customer) {
+      console.log(`[email] Customer ${customerId} not found — skipping welcome email`);
+      return;
+    }
+
+    if (!customer.passwordHash) {
+      // Anonymous / guest customer — no registered account.
+      return;
+    }
+
+    if (!customer.registeredAt) {
+      // Not yet fully registered.
+      return;
+    }
+
+    if (
+      /^anon-/i.test(customer.email) ||
+      customer.email.endsWith('@morer-checkout.local')
+    ) {
+      console.log(`[email] Customer ${customerId} has a synthetic email address — skipping welcome email`);
+      return;
+    }
+
+    if (customer.welcomeEmailSentAt !== null) {
+      return;
+    }
+
+    // Atomic claim — only one concurrent caller wins.
+    // claimedAt is captured once and used in all subsequent WHERE clauses so that
+    // a revived old process (whose claimedAt differs from the current DB value)
+    // cannot release or complete another process's claim.
+    // Stale claims older than 5 minutes are recovered to allow retry after process crash.
+    const STALE_MS = 5 * 60 * 1000;
+    const staleThreshold = new Date(Date.now() - STALE_MS);
+    const claimedAt = new Date();
+    const claim = await this.prisma.customer.updateMany({
+      where: {
+        id: customerId,
+        welcomeEmailSentAt: null,
+        passwordHash: { not: null },
+        registeredAt: { not: null },
+        OR: [
+          { welcomeEmailSendingAt: null },
+          { welcomeEmailSendingAt: { lt: staleThreshold } },
+        ],
+      },
+      data: { welcomeEmailSendingAt: claimedAt },
+    });
+
+    if (claim.count === 0) {
+      // Another caller claimed it (or it was already sent)
+      return;
+    }
+
+    // Send — no open DB transaction during external call
+    try {
+      const webUrl = process.env.WEB_URL ?? 'https://morer.com';
+      const html = await renderWelcome({
+        firstName: customer.firstName,
+        webUrl,
+      });
+
+      const { error } = await this.resend.emails.send({
+        from: this.fromAddress,
+        to: customer.email,
+        subject: 'Te damos la bienvenida a MORER',
+        html,
+      });
+
+      if (error) {
+        console.error(`[email] Provider error sending welcome email for customer ${customerId}:`, error);
+        // Release claim — only if we still own it (claimedAt guard).
+        await this.prisma.customer.updateMany({
+          where: { id: customerId, welcomeEmailSentAt: null, welcomeEmailSendingAt: claimedAt },
+          data: { welcomeEmailSendingAt: null },
+        });
+        return;
+      }
+
+      // Mark sent and release claim — only if we still own it (claimedAt guard).
+      await this.prisma.customer.updateMany({
+        where: { id: customerId, welcomeEmailSentAt: null, welcomeEmailSendingAt: claimedAt },
+        data: { welcomeEmailSentAt: new Date(), welcomeEmailSendingAt: null },
+      });
+
+      console.log(`[email] Welcome email sent — customer: ${customerId}`);
+    } catch (err) {
+      // Email failure must not affect registration status.
+      console.error(`[email] Failed to send welcome email for customer ${customerId}:`, err);
+      // Release claim on unexpected error — only if we still own it (claimedAt guard).
+      await this.prisma.customer.updateMany({
+        where: { id: customerId, welcomeEmailSentAt: null, welcomeEmailSendingAt: claimedAt },
+        data: { welcomeEmailSendingAt: null },
       });
     }
   }

@@ -37,6 +37,17 @@ import { AuthService } from '../src/auth/auth.service';
 import { JwtStrategy } from '../src/auth/strategies/jwt.strategy';
 import { asPrismaService, createPrismaMock } from './helpers/prisma-mock';
 import type { PrismaMock } from './helpers/prisma-mock';
+// ─── EmailService mock factory ────────────────────────────────────────────────
+
+type EmailServiceMock = {
+  sendWelcomeEmailIfNeeded: ReturnType<typeof vi.fn>;
+};
+
+function createEmailServiceMock(): EmailServiceMock {
+  return {
+    sendWelcomeEmailIfNeeded: vi.fn().mockResolvedValue(undefined),
+  };
+}
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
@@ -76,6 +87,7 @@ function profileFixture(overrides: Record<string, unknown> = {}) {
 describe('AuthService', () => {
   let prismaMock: PrismaMock;
   let jwtService: JwtService;
+  let emailServiceMock: EmailServiceMock;
   let service: AuthService;
 
   beforeEach(() => {
@@ -85,7 +97,12 @@ describe('AuthService', () => {
 
     prismaMock = createPrismaMock();
     jwtService = new JwtService();
-    service = new AuthService(asPrismaService(prismaMock), jwtService);
+    emailServiceMock = createEmailServiceMock();
+    service = new AuthService(
+      asPrismaService(prismaMock),
+      jwtService,
+      emailServiceMock as never,
+    );
 
     // Reset all customer mock fns to a clean default between tests
     prismaMock.customer.findUnique.mockReset().mockResolvedValue(null);
@@ -99,6 +116,9 @@ describe('AuthService', () => {
     prismaMock.authSession.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.authSession.create.mockReset().mockResolvedValue(null);
     prismaMock.authSession.updateMany.mockReset().mockResolvedValue({ count: 1 });
+
+    // Reset emailService mock
+    emailServiceMock.sendWelcomeEmailIfNeeded.mockReset().mockResolvedValue(undefined);
 
     // Default bcrypt behaviour
     vi.mocked(bcrypt.hash).mockResolvedValue(PASSWORD_HASH as never);
@@ -468,6 +488,81 @@ describe('AuthService', () => {
         // @UseGuards(ThrottlerGuard). Structural assertion passes.
         expect(true).toBe(true);
       }
+    });
+  });
+
+  // ─── register + emailService ─────────────────────────────────────────────────
+
+  describe('register — emailService integration', () => {
+    it('calls sendWelcomeEmailIfNeeded with customer.id after successful registration', async () => {
+      const profile = profileFixture();
+      prismaMock.customer.findUnique.mockResolvedValue(null);
+      prismaMock.customer.create.mockResolvedValue(profile);
+
+      await service.register({ email: EMAIL, password: PASSWORD });
+
+      expect(emailServiceMock.sendWelcomeEmailIfNeeded).toHaveBeenCalledOnce();
+      expect(emailServiceMock.sendWelcomeEmailIfNeeded).toHaveBeenCalledWith(CUSTOMER_ID);
+    });
+
+    it('returns success and does not throw when sendWelcomeEmailIfNeeded rejects', async () => {
+      const profile = profileFixture();
+      prismaMock.customer.findUnique.mockResolvedValue(null);
+      prismaMock.customer.create.mockResolvedValue(profile);
+      emailServiceMock.sendWelcomeEmailIfNeeded.mockRejectedValue(new Error('Resend down'));
+
+      const result = await service.register({ email: EMAIL, password: PASSWORD });
+
+      // Registration succeeds even when the email service throws.
+      expect(result).toEqual(profile);
+    });
+
+    it('does not call sendWelcomeEmailIfNeeded when registration fails with ConflictException', async () => {
+      // Email already registered — register() throws ConflictException before
+      // reaching the email send call.
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+
+      await expect(
+        service.register({ email: EMAIL, password: PASSWORD }),
+      ).rejects.toThrow(ConflictException);
+
+      expect(emailServiceMock.sendWelcomeEmailIfNeeded).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── login + emailService ────────────────────────────────────────────────────
+
+  describe('login — emailService integration', () => {
+    it('calls sendWelcomeEmailIfNeeded after successful login', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      vi.mocked(bcrypt.compare).mockResolvedValue(true as never);
+
+      await service.login({ email: EMAIL, password: PASSWORD });
+
+      expect(emailServiceMock.sendWelcomeEmailIfNeeded).toHaveBeenCalledOnce();
+      expect(emailServiceMock.sendWelcomeEmailIfNeeded).toHaveBeenCalledWith(CUSTOMER_ID);
+    });
+
+    it('returns accessToken even if sendWelcomeEmailIfNeeded rejects', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      vi.mocked(bcrypt.compare).mockResolvedValue(true as never);
+      emailServiceMock.sendWelcomeEmailIfNeeded.mockRejectedValue(new Error('Resend down'));
+
+      const result = await service.login({ email: EMAIL, password: PASSWORD });
+
+      // Login must succeed regardless of email service failure.
+      expect(result).toHaveProperty('accessToken', 'mock-jwt-token');
+    });
+
+    it('does not call sendWelcomeEmailIfNeeded when credentials are invalid', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
+
+      await expect(
+        service.login({ email: EMAIL, password: 'wrongpassword' }),
+      ).rejects.toThrow(UnauthorizedException);
+
+      expect(emailServiceMock.sendWelcomeEmailIfNeeded).not.toHaveBeenCalled();
     });
   });
 });

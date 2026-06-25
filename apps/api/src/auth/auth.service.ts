@@ -1,11 +1,13 @@
 import {
   ConflictException,
   Injectable,
+  Logger,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
 import { randomUUID } from 'crypto';
+import { EmailService } from '../email/email.service';
 import { PrismaService } from '../database/prisma.service';
 import type { LoginDto } from './dto/login.dto';
 import type { RegisterDto } from './dto/register.dto';
@@ -174,6 +176,8 @@ function isPrismaUniqueConstraint(err: unknown): boolean {
 
 @Injectable()
 export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+
   // Stored as unknown so the stale PrismaService type cannot flow back through
   // the db getter and cause TS errors on fields the old generated client lacks.
   // Remove once `prisma generate` has been re-run against the current schema.
@@ -182,9 +186,9 @@ export class AuthService {
   constructor(
     // Plain parameter (no field shorthand) so NestJS can inject PrismaService
     // while we store it via _db: unknown to break the stale type chain.
-    // eslint-disable-next-line @typescript-eslint/no-unused-vars
-    private readonly prisma: PrismaService,
+    prisma: PrismaService,
     private readonly jwtService: JwtService,
+    private readonly emailService: EmailService,
   ) {
     if (!process.env.JWT_SECRET) {
       throw new Error('JWT_SECRET is required');
@@ -275,6 +279,12 @@ export class AuthService {
         });
       }
 
+      try {
+        await this.emailService.sendWelcomeEmailIfNeeded(customer.id);
+      } catch (err) {
+        this.logger.warn('welcome-email-register-error', { customerId: customer.id });
+      }
+
       return customer;
     } catch (err) {
       if (isPrismaUniqueConstraint(err)) {
@@ -337,6 +347,12 @@ export class AuthService {
         expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000),
       },
     });
+
+    try {
+      await this.emailService.sendWelcomeEmailIfNeeded(customer.id);
+    } catch (err) {
+      this.logger.warn('welcome-email-login-error', { customerId: customer.id });
+    }
 
     return {
       accessToken,

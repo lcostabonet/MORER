@@ -125,10 +125,12 @@ model Customer {
   firstName       String?
   lastName        String?
   phone           String?
-  passwordHash    String?
-  registeredAt    DateTime?
-  createdAt       DateTime  @default(now())
-  updatedAt       DateTime  @updatedAt
+  passwordHash          String?
+  registeredAt          DateTime?
+  welcomeEmailSentAt    DateTime?
+  welcomeEmailSendingAt DateTime?
+  createdAt             DateTime  @default(now())
+  updatedAt             DateTime  @updatedAt
 
   carts    Cart[]
   orders   Order[]
