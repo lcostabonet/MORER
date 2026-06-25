@@ -16,7 +16,13 @@ import { RegisterDto } from './dto/register.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 interface AuthenticatedRequest {
-  user: { id: string; email: string };
+  user: {
+    id: string;
+    email: string;
+    firstName: string | null;
+    lastName: string | null;
+    sessionId: string;
+  };
 }
 
 @Controller('auth')
@@ -43,5 +49,21 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   getMe(@Request() req: AuthenticatedRequest) {
     return this.authService.getMe(req.user.id);
+  }
+
+  @Post('logout')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async logout(@Request() req: AuthenticatedRequest) {
+    await this.authService.logout(req.user.id, req.user.sessionId);
+    return { success: true };
+  }
+
+  @Post('logout-all')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async logoutAll(@Request() req: AuthenticatedRequest) {
+    await this.authService.logoutAll(req.user.id);
+    return { success: true };
   }
 }

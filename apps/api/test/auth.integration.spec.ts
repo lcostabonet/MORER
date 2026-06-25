@@ -31,6 +31,8 @@ vi.mock('../src/auth/auth.service', () => ({
   AuthService: class MockAuthService {
     register = vi.fn();
     login = vi.fn();
+    logout = vi.fn().mockResolvedValue(undefined);
+    logoutAll = vi.fn().mockResolvedValue(undefined);
     getMe = vi.fn();
   },
 }));
@@ -50,6 +52,7 @@ import { JwtAuthGuard } from '../src/auth/guards/jwt-auth.guard';
 // ─── Fixtures ────────────────────────────────────────────────────────────────
 
 const CUSTOMER_ID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+const SESSION_ID = 'b2c3d4e5-f6a7-8901-bcde-f12345678901';
 const VALID_EMAIL = 'joan@example.com';
 const VALID_PASSWORD = 'validpassword123';
 
@@ -70,7 +73,7 @@ function profileFixture(overrides: Record<string, unknown> = {}) {
  * or describe block. The caller can override guards before init.
  */
 async function buildApp(overrideGuards?: {
-  jwt?: { canActivate: () => boolean | Promise<boolean> };
+  jwt?: { canActivate: (ctx?: unknown) => boolean | Promise<boolean> };
   throttler?: { canActivate: () => boolean | Promise<boolean> };
 }): Promise<{ app: INestApplication; authService: AuthService }> {
   const builder = Test.createTestingModule({
@@ -96,6 +99,32 @@ async function buildApp(overrideGuards?: {
   return { app, authService };
 }
 
+/**
+ * Returns a canActivate implementation that injects req.user with id,
+ * email, firstName, lastName, and sessionId — matching AuthenticatedRequest.
+ */
+function authenticatedGuard(userId: string, sessionId: string) {
+  return {
+    canActivate: (ctx?: unknown) => {
+      if (ctx && typeof ctx === 'object' && 'switchToHttp' in ctx) {
+        const req = (ctx as {
+          switchToHttp: () => { getRequest: () => Record<string, unknown> };
+        })
+          .switchToHttp()
+          .getRequest();
+        req['user'] = {
+          id: userId,
+          email: VALID_EMAIL,
+          firstName: 'Joan',
+          lastName: 'Costa',
+          sessionId,
+        };
+      }
+      return true;
+    },
+  };
+}
+
 // ─── Tests ───────────────────────────────────────────────────────────────────
 
 describe('Auth HTTP integration (Phase 11A-alpha)', () => {
@@ -103,11 +132,21 @@ describe('Auth HTTP integration (Phase 11A-alpha)', () => {
   let authService: AuthService;
 
   beforeAll(async () => {
+    // Required by AuthService constructor validation (even though AuthService
+    // is mocked, the env vars are set for consistency and for any future
+    // real-module tests in the same process).
+    process.env.JWT_ISSUER = 'test-issuer';
+    process.env.JWT_AUDIENCE = 'test-audience';
+    process.env.JWT_SECRET = 'test-secret';
+
     ({ app, authService } = await buildApp());
   });
 
   afterAll(async () => {
     await app.close();
+    delete process.env.JWT_ISSUER;
+    delete process.env.JWT_AUDIENCE;
+    delete process.env.JWT_SECRET;
   });
 
   afterEach(() => {
@@ -250,18 +289,7 @@ describe('Auth HTTP integration (Phase 11A-alpha)', () => {
     // The default app has JwtAuthGuard always returning true, but getMe needs
     // req.user.id. Build a dedicated app that injects req.user properly.
     const { app: meApp } = await buildApp({
-      jwt: {
-        canActivate: (ctx?: unknown) => {
-          // Inject req.user so the controller can call authService.getMe(req.user.id)
-          if (ctx && typeof ctx === 'object' && 'switchToHttp' in ctx) {
-            const req = (ctx as { switchToHttp: () => { getRequest: () => Record<string, unknown> } })
-              .switchToHttp()
-              .getRequest();
-            req['user'] = { id: CUSTOMER_ID, email: VALID_EMAIL };
-          }
-          return true;
-        },
-      },
+      jwt: authenticatedGuard(CUSTOMER_ID, SESSION_ID),
     });
 
     const meAuthService = (meApp as unknown as { _moduleRef: { get: (token: unknown) => AuthService } })['_moduleRef']?.get(AuthService);
@@ -330,5 +358,70 @@ describe('Auth HTTP integration (Phase 11A-alpha)', () => {
     const calledWith = vi.mocked(authService.register).mock.calls[0][0] as unknown as Record<string, unknown>;
     expect(calledWith).not.toHaveProperty('unknownField');
     expect(calledWith).not.toHaveProperty('anotherBadField');
+  });
+
+  // ── 12. POST /auth/logout — valid JWT → 200 { success: true } ────────────
+
+  it('12. POST /auth/logout with valid JWT → 200 { success: true }', async () => {
+    const { app: logoutApp, authService: logoutService } = await buildApp({
+      jwt: authenticatedGuard(CUSTOMER_ID, SESSION_ID),
+    });
+    vi.mocked(logoutService.logout).mockResolvedValue(undefined as never);
+
+    try {
+      const res = await request(logoutApp.getHttpServer())
+        .post('/auth/logout')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true });
+    } finally {
+      await logoutApp.close();
+    }
+  });
+
+  // ── 13. POST /auth/logout-all — valid JWT → 200 { success: true } ────────
+
+  it('13. POST /auth/logout-all with valid JWT → 200 { success: true }', async () => {
+    const { app: logoutAllApp, authService: logoutAllService } = await buildApp({
+      jwt: authenticatedGuard(CUSTOMER_ID, SESSION_ID),
+    });
+    vi.mocked(logoutAllService.logoutAll).mockResolvedValue(undefined as never);
+
+    try {
+      const res = await request(logoutAllApp.getHttpServer())
+        .post('/auth/logout-all')
+        .set('Authorization', 'Bearer valid-token');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toEqual({ success: true });
+    } finally {
+      await logoutAllApp.close();
+    }
+  });
+
+  // ── 14. GET /auth/me — JWT with no sid field → 401 ───────────────────────
+
+  it('14. GET /auth/me with JWT that has no sid field → 401', async () => {
+    // Simulate the guard rejecting a token missing the sid claim.
+    // In production JwtStrategy.validate() throws UnauthorizedException
+    // when payload.sid is absent; the guard propagates that as a 401.
+    const { app: noSidApp } = await buildApp({
+      jwt: {
+        canActivate: () => {
+          throw new UnauthorizedException('Invalid token: missing session id');
+        },
+      },
+    });
+
+    try {
+      const res = await request(noSidApp.getHttpServer())
+        .get('/auth/me')
+        .set('Authorization', 'Bearer token-without-sid');
+
+      expect(res.status).toBe(401);
+    } finally {
+      await noSidApp.close();
+    }
   });
 });

@@ -51,7 +51,8 @@ export function LoginForm({ next }: LoginFormProps) {
       });
 
       if (res.ok) {
-        router.push(safeNext);
+        router.replace(safeNext);
+        router.refresh();
         return;
       }
 

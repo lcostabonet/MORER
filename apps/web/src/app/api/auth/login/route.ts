@@ -1,7 +1,11 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getApiUrl, COOKIE_NAME, COOKIE_OPTIONS, isValidRedirect } from '@/lib/auth';
+import { checkCsrf } from '@/lib/csrf';
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const csrfCheck = checkCsrf(request);
+  if (csrfCheck) return csrfCheck;
+
   let body: unknown;
   try {
     body = await request.json();

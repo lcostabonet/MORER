@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getApiUrl, COOKIE_NAME, COOKIE_OPTIONS } from '@/lib/auth';
+import { getApiUrl, COOKIE_NAME, clearAuthCookies } from '@/lib/auth';
 import type { AuthUser } from '@/lib/auth';
 
 export async function GET(request: NextRequest): Promise<NextResponse> {
@@ -23,7 +23,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
   if (res.status === 401 || res.status === 403) {
     const response = NextResponse.json({ error: 'Unauthorized' }, { status: 401 });
     // Clear stale cookie
-    response.cookies.set(COOKIE_NAME, '', { ...COOKIE_OPTIONS, maxAge: 0 });
+    clearAuthCookies(response);
     return response;
   }
 

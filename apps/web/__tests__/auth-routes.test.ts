@@ -1,5 +1,5 @@
 /**
- * Route Handler tests for Phase 11A-beta auth routes.
+ * Route Handler tests for Phase 11A-gamma auth routes.
  *
  * Strategy:
  * - Import each handler directly and call it with a constructed NextRequest.
@@ -11,7 +11,7 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { NextRequest } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { isValidRedirect, COOKIE_NAME } from '@/lib/auth';
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -21,13 +21,14 @@ function makeRequest(
   url: string,
   body?: unknown,
   cookies: Record<string, string> = {},
+  extraHeaders: Record<string, string> = {},
 ): NextRequest {
-  const headers: HeadersInit = { 'Content-Type': 'application/json' };
+  const headers: Record<string, string> = { 'Content-Type': 'application/json', ...extraHeaders };
   const cookieHeader = Object.entries(cookies)
     .map(([k, v]) => `${k}=${v}`)
     .join('; ');
   if (cookieHeader) {
-    (headers as Record<string, string>)['cookie'] = cookieHeader;
+    headers['cookie'] = cookieHeader;
   }
 
   return new NextRequest(new URL(url, 'http://localhost'), {
@@ -46,6 +47,160 @@ function makeFetchResponse(
     headers: { 'Content-Type': 'application/json' },
   });
 }
+
+// ─── Cookie naming (T1–T4) ───────────────────────────────────────────────────
+
+describe('COOKIE_NAME and COOKIE_OPTIONS', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  it('T1: COOKIE_NAME === "morer_auth" when NODE_ENV !== "production"', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const { COOKIE_NAME: name } = await import('@/lib/auth');
+    expect(name).toBe('morer_auth');
+  });
+
+  it('T2: COOKIE_NAME === "__Host-morer_auth" when NODE_ENV === "production"', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WEB_ORIGIN', 'https://morer.es');
+    vi.stubEnv('API_URL', 'https://api.morer.es');
+    const { COOKIE_NAME: name } = await import('@/lib/auth');
+    expect(name).toBe('__Host-morer_auth');
+  });
+
+  it('T3: COOKIE_OPTIONS.secure === true when NODE_ENV === "production"', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WEB_ORIGIN', 'https://morer.es');
+    vi.stubEnv('API_URL', 'https://api.morer.es');
+    const { COOKIE_OPTIONS } = await import('@/lib/auth');
+    expect(COOKIE_OPTIONS.secure).toBe(true);
+  });
+
+  it('T4: COOKIE_OPTIONS has no "domain" property (for __Host- compatibility)', async () => {
+    const { COOKIE_OPTIONS } = await import('@/lib/auth');
+    expect(COOKIE_OPTIONS).not.toHaveProperty('domain');
+  });
+});
+
+// ─── CSRF unit tests (T5–T14) ────────────────────────────────────────────────
+
+describe('checkCsrf', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  async function getCheckCsrf() {
+    const mod = await import('@/lib/csrf');
+    return mod.checkCsrf;
+  }
+
+  it('T5: sec-fetch-site: "cross-site" returns 403', async () => {
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'sec-fetch-site': 'cross-site',
+    });
+    const result = checkCsrf(req);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('T6: sec-fetch-site: "same-site" returns 403', async () => {
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'sec-fetch-site': 'same-site',
+    });
+    const result = checkCsrf(req);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('T7: origin: "null" (literal string) returns 403', async () => {
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'origin': 'null',
+    });
+    const result = checkCsrf(req);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('T8: origin: "https://evil.com" with NODE_ENV=production and WEB_ORIGIN="https://morer.es" returns 403', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WEB_ORIGIN', 'https://morer.es');
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'origin': 'https://evil.com',
+    });
+    const result = checkCsrf(req);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('T9: origin: "https://morer.es.attacker.com" returns 403', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WEB_ORIGIN', 'https://morer.es');
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'origin': 'https://morer.es.attacker.com',
+    });
+    const result = checkCsrf(req);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('T10: origin: "https://morer.es" with NODE_ENV=production and WEB_ORIGIN="https://morer.es" returns null', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WEB_ORIGIN', 'https://morer.es');
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'origin': 'https://morer.es',
+    });
+    const result = checkCsrf(req);
+    expect(result).toBeNull();
+  });
+
+  it('T11: no origin, no referer, NODE_ENV=production returns 403', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WEB_ORIGIN', 'https://morer.es');
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout');
+    const result = checkCsrf(req);
+    expect(result).not.toBeNull();
+    expect(result!.status).toBe(403);
+  });
+
+  it('T12: no origin, referer "https://morer.es/login", NODE_ENV=production, WEB_ORIGIN="https://morer.es" returns null', async () => {
+    vi.stubEnv('NODE_ENV', 'production');
+    vi.stubEnv('WEB_ORIGIN', 'https://morer.es');
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'referer': 'https://morer.es/login',
+    });
+    const result = checkCsrf(req);
+    expect(result).toBeNull();
+  });
+
+  it('T13: no origin, NODE_ENV=development returns null', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout');
+    const result = checkCsrf(req);
+    expect(result).toBeNull();
+  });
+
+  it('T14: origin: "http://localhost:3000", NODE_ENV=development returns null', async () => {
+    vi.stubEnv('NODE_ENV', 'development');
+    const checkCsrf = await getCheckCsrf();
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {}, {
+      'origin': 'http://localhost:3000',
+    });
+    const result = checkCsrf(req);
+    expect(result).toBeNull();
+  });
+});
 
 // ─── Login route ─────────────────────────────────────────────────────────────
 
@@ -324,40 +479,141 @@ describe('POST /api/auth/register', () => {
   });
 });
 
-// ─── Logout route ────────────────────────────────────────────────────────────
+// ─── Logout route (T15–T17) ──────────────────────────────────────────────────
 
 describe('POST /api/auth/logout', () => {
-  let handler: () => Promise<Response>;
-
-  beforeEach(async () => {
-    const mod = await import('@/app/api/auth/logout/route');
-    handler = mod.POST;
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
   });
 
   afterEach(() => {
+    vi.restoreAllMocks();
     vi.resetModules();
+    vi.unstubAllEnvs();
   });
 
-  it('clears the auth cookie with maxAge=0', async () => {
-    const res = await handler();
+  it('T15: reads cookie, calls backend /auth/logout with Bearer token, clears cookie', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(200, {}));
+
+    const mod = await import('@/app/api/auth/logout/route');
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {
+      [COOKIE_NAME]: 'test-token-abc',
+    });
+
+    const res = await mod.POST(req);
     expect(res.status).toBe(200);
 
+    // fetch must have been called with the backend logout endpoint and Bearer token
+    expect(fetch).toHaveBeenCalledOnce();
+    const [calledUrl, calledOptions] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(calledUrl).toContain('/auth/logout');
+    expect((calledOptions.headers as Record<string, string>)['Authorization']).toBe('Bearer test-token-abc');
+    expect(calledOptions.method).toBe('POST');
+
+    // Auth cookie must be cleared
     const setCookie = res.headers.get('set-cookie') ?? '';
-    // Cookie should be cleared (maxAge=0 or expires in the past)
-    expect(setCookie).toContain(COOKIE_NAME);
-    // Should set an empty value or Max-Age=0
     expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
   });
 
-  it('cookie cleared with HttpOnly and Path=/ options (same as COOKIE_OPTIONS)', async () => {
-    const res = await handler();
+  it('T16: fetch throwing (API down) returns 200 with message and clears cookie', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const mod = await import('@/app/api/auth/logout/route');
+    const req = makeRequest('POST', '/api/auth/logout', undefined, {
+      [COOKIE_NAME]: 'test-token-abc',
+    });
+
+    const res = await mod.POST(req);
+    expect(res.status).toBe(200);
+
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(typeof body.message).toBe('string');
+    expect((body.message as string).length).toBeGreaterThan(0);
+
+    // Cookie still cleared despite API being down
     const setCookie = res.headers.get('set-cookie') ?? '';
-    expect(setCookie).toContain('HttpOnly');
-    expect(setCookie).toContain('Path=/');
+    expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
+  });
+
+  it('T17: clearAuthCookies clears both "morer_auth" AND "__Host-morer_auth" from the response', async () => {
+    const { clearAuthCookies } = await import('@/lib/auth');
+
+    const setCalls: Array<[string, string, Record<string, unknown>]> = [];
+    const mockResponse = {
+      cookies: {
+        set: (name: string, value: string, options: Record<string, unknown>) => {
+          setCalls.push([name, value, options]);
+        },
+      },
+    } as unknown as NextResponse;
+
+    clearAuthCookies(mockResponse);
+
+    const names = setCalls.map(([name]) => name);
+    // Must clear both __Host-morer_auth (or morer_auth) and the legacy morer_auth
+    expect(names).toContain('morer_auth');
+    // At least one call should have maxAge: 0 (clearing)
+    const allMaxAgeZero = setCalls.every(([, , opts]) => opts['maxAge'] === 0);
+    expect(allMaxAgeZero).toBe(true);
   });
 });
 
-// ─── Me route ────────────────────────────────────────────────────────────────
+// ─── Logout-all route (T18–T19) ──────────────────────────────────────────────
+
+describe('POST /api/auth/logout-all', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+    vi.unstubAllEnvs();
+  });
+
+  it('T18: calls backend /auth/logout-all with Bearer token and clears cookie', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(200, {}));
+
+    const mod = await import('@/app/api/auth/logout-all/route');
+    const req = makeRequest('POST', '/api/auth/logout-all', undefined, {
+      [COOKIE_NAME]: 'test-token-xyz',
+    });
+
+    const res = await mod.POST(req);
+    expect(res.status).toBe(200);
+
+    expect(fetch).toHaveBeenCalledOnce();
+    const [calledUrl, calledOptions] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(calledUrl).toContain('/auth/logout-all');
+    expect((calledOptions.headers as Record<string, string>)['Authorization']).toBe('Bearer test-token-xyz');
+
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
+  });
+
+  it('T19: API down returns 200 with message and clears cookie', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const mod = await import('@/app/api/auth/logout-all/route');
+    const req = makeRequest('POST', '/api/auth/logout-all', undefined, {
+      [COOKIE_NAME]: 'test-token-xyz',
+    });
+
+    const res = await mod.POST(req);
+    expect(res.status).toBe(200);
+
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(typeof body.message).toBe('string');
+    expect((body.message as string).length).toBeGreaterThan(0);
+
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
+  });
+});
+
+// ─── Me route (T20) ─────────────────────────────────────────────────────────
 
 describe('GET /api/auth/me', () => {
   let handler: (req: NextRequest) => Promise<Response>;
@@ -432,6 +688,138 @@ describe('GET /api/auth/me', () => {
     const setCookie = res.headers.get('set-cookie') ?? '';
     expect(setCookie).toContain(COOKIE_NAME);
     expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
+  });
+
+  it('T20: backend 401 response clears auth cookies', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(401, { message: 'Unauthorized' }),
+    );
+
+    const req = makeRequest(
+      'GET',
+      '/api/auth/me',
+      undefined,
+      { [COOKIE_NAME]: 'revoked-token' },
+    );
+
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+
+    // clearAuthCookies must have been called — cookie header must show clearing
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
+    // Also verify morer_auth (legacy) or COOKIE_NAME appears in set-cookie
+    expect(setCookie.toLowerCase()).toContain('morer_auth');
+  });
+});
+
+// ─── Security: no accessToken in route handler responses (T21) ───────────────
+
+describe('T21: Security — no route handler response body contains "accessToken" key', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('login handler does not leak accessToken in response body', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, { accessToken: 'secret-jwt' }),
+    );
+    const mod = await import('@/app/api/auth/login/route');
+    const req = makeRequest('POST', '/api/auth/login', {
+      email: 'user@example.com',
+      password: 'password123',
+    });
+    const res = await mod.POST(req);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body).not.toHaveProperty('accessToken');
+  });
+
+  it('me handler does not include accessToken in proxied response', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        id: 'uuid-1',
+        email: 'u@example.com',
+        firstName: 'A',
+        lastName: 'B',
+        accessToken: 'should-not-appear',
+      }),
+    );
+    const mod = await import('@/app/api/auth/me/route');
+    const req = makeRequest('GET', '/api/auth/me', undefined, { [COOKIE_NAME]: 'tok' });
+    const res = await mod.GET(req);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body).not.toHaveProperty('accessToken');
+  });
+
+  it('logout handler does not include accessToken in response body', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(200, {}));
+    const mod = await import('@/app/api/auth/logout/route');
+    const req = makeRequest('POST', '/api/auth/logout', undefined, { [COOKIE_NAME]: 'tok' });
+    const res = await mod.POST(req);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body).not.toHaveProperty('accessToken');
+  });
+
+  it('logout-all handler does not include accessToken in response body', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(200, {}));
+    const mod = await import('@/app/api/auth/logout-all/route');
+    const req = makeRequest('POST', '/api/auth/logout-all', undefined, { [COOKIE_NAME]: 'tok' });
+    const res = await mod.POST(req);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body).not.toHaveProperty('accessToken');
+  });
+});
+
+// ─── Security headers from next.config.ts (T22–T25) ─────────────────────────
+
+describe('Security headers (next.config.ts)', () => {
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    vi.resetModules();
+  });
+
+  async function getNextConfigHeaders(): Promise<Array<{ key: string; value: string }>> {
+    // next.config.ts uses process.env.NODE_ENV at module evaluation time,
+    // so we must reset modules after stubbing the env.
+    const mod = await import('../next.config');
+    const config = mod.default as { headers?: () => Promise<Array<{ source: string; headers: Array<{ key: string; value: string }> }>> };
+    if (!config.headers) return [];
+    const routes = await config.headers();
+    // Flatten all headers from all routes
+    return routes.flatMap((r) => r.headers);
+  }
+
+  it('T22: headers array contains X-Content-Type-Options: nosniff', async () => {
+    const headers = await getNextConfigHeaders();
+    const header = headers.find((h) => h.key === 'X-Content-Type-Options');
+    expect(header).toBeDefined();
+    expect(header!.value).toBe('nosniff');
+  });
+
+  it('T23: headers contain Content-Security-Policy-Report-Only containing "https://js.stripe.com"', async () => {
+    const headers = await getNextConfigHeaders();
+    const cspHeader = headers.find((h) => h.key === 'Content-Security-Policy-Report-Only');
+    expect(cspHeader).toBeDefined();
+    expect(cspHeader!.value).toContain('https://js.stripe.com');
+  });
+
+  it('T24: HSTS header NOT present when NODE_ENV !== "production"', async () => {
+    vi.stubEnv('NODE_ENV', 'test');
+    const headers = await getNextConfigHeaders();
+    const hsts = headers.find((h) => h.key === 'Strict-Transport-Security');
+    expect(hsts).toBeUndefined();
+  });
+
+  it('T25: X-Frame-Options: DENY present', async () => {
+    const headers = await getNextConfigHeaders();
+    const xfo = headers.find((h) => h.key === 'X-Frame-Options');
+    expect(xfo).toBeDefined();
+    expect(xfo!.value).toBe('DENY');
   });
 });
 

@@ -1,9 +1,13 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getApiUrl, COOKIE_NAME, COOKIE_OPTIONS } from '@/lib/auth';
+import { checkCsrf } from '@/lib/csrf';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/;
 
 export async function POST(request: NextRequest): Promise<NextResponse> {
+  const csrfCheck = checkCsrf(request);
+  if (csrfCheck) return csrfCheck;
+
   let body: unknown;
   try {
     body = await request.json();

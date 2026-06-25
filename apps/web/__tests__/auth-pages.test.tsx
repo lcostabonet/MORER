@@ -1,5 +1,5 @@
 /**
- * Component tests for Phase 11A-beta auth page components.
+ * Component tests for Phase 11A-gamma auth page components.
  *
  * Uses @testing-library/react + jsdom.
  * next/navigation is mocked so useRouter does not throw outside Next.js.
@@ -14,9 +14,13 @@ import React from 'react';
 // ─── Mock next/navigation ────────────────────────────────────────────────────
 
 const mockPush = vi.fn();
+const mockReplace = vi.fn();
+const mockRefresh = vi.fn();
+const mockRedirect = vi.fn();
 
 vi.mock('next/navigation', () => ({
-  useRouter: () => ({ push: mockPush }),
+  useRouter: () => ({ push: mockPush, replace: mockReplace, refresh: mockRefresh }),
+  redirect: (...args: unknown[]) => mockRedirect(...args),
 }));
 
 // ─── Mock next/link ──────────────────────────────────────────────────────────
@@ -35,6 +39,8 @@ describe('RegisterForm', () => {
     user = userEvent.setup();
     vi.stubGlobal('fetch', vi.fn());
     mockPush.mockReset();
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
   });
 
   afterEach(() => {
@@ -191,6 +197,27 @@ describe('RegisterForm', () => {
       expect(document.getElementById(inputId)).toBeInTheDocument();
     }
   });
+
+  it('navigates to /account and calls router.refresh() on successful registration with auto-login', async () => {
+    // First fetch: register succeeds
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderRegisterForm();
+
+    await user.type(screen.getByLabelText(/nombre/i), 'Joan');
+    await user.type(screen.getByLabelText(/apellidos/i), 'Costa');
+    await user.type(screen.getByLabelText(/email/i), 'joan@example.com');
+    await user.type(screen.getByLabelText(/contraseña/i), 'password123');
+    await user.click(screen.getByRole('button', { name: /crear cuenta/i }));
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith('/account');
+      expect(mockRefresh).toHaveBeenCalledOnce();
+    });
+    expect(mockPush).not.toHaveBeenCalled();
+  });
 });
 
 // ─── LoginForm ───────────────────────────────────────────────────────────────
@@ -202,6 +229,8 @@ describe('LoginForm', () => {
     user = userEvent.setup();
     vi.stubGlobal('fetch', vi.fn());
     mockPush.mockReset();
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
   });
 
   afterEach(() => {
@@ -327,9 +356,271 @@ describe('LoginForm', () => {
     await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
 
     await waitFor(() => {
-      // Should redirect to /account, not to the evil URL
-      expect(mockPush).toHaveBeenCalledWith('/account');
-      expect(mockPush).not.toHaveBeenCalledWith('//evil.com');
+      // Should redirect to /account, not to the evil URL — uses replace, not push
+      expect(mockReplace).toHaveBeenCalledWith('/account');
+      expect(mockReplace).not.toHaveBeenCalledWith('//evil.com');
     });
+  });
+
+  it('navigates to safeNext and calls router.refresh() on successful login', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderLoginForm('/account');
+
+    await user.type(screen.getByLabelText(/email/i), 'user@example.com');
+    await user.type(screen.getByLabelText(/contraseña/i), 'password123');
+    await user.click(screen.getByRole('button', { name: /iniciar sesión/i }));
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith('/account');
+      expect(mockRefresh).toHaveBeenCalledOnce();
+    });
+    // Must use replace, not push, to prevent the login page from stacking in history
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+});
+
+// ─── LogoutButton ─────────────────────────────────────────────────────────────
+
+describe('LogoutButton', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+    mockPush.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderLogoutButton() {
+    const { LogoutButton } = await import('@/app/account/_components/LogoutButton');
+    return render(React.createElement(LogoutButton));
+  }
+
+  it('calls /api/auth/logout and then router.replace("/") + router.refresh()', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderLogoutButton();
+    await user.click(screen.getByRole('button', { name: /cerrar sesión/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith('/api/auth/logout', { method: 'POST' });
+      expect(mockReplace).toHaveBeenCalledWith('/');
+      expect(mockRefresh).toHaveBeenCalledOnce();
+    });
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it('still calls router.replace("/") + router.refresh() even if fetch throws', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('Network error'));
+
+    await renderLogoutButton();
+    await user.click(screen.getByRole('button', { name: /cerrar sesión/i }));
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith('/');
+      expect(mockRefresh).toHaveBeenCalledOnce();
+    });
+  });
+});
+
+// ─── LogoutAllButton ──────────────────────────────────────────────────────────
+
+describe('LogoutAllButton', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+    vi.stubGlobal('confirm', vi.fn());
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+    mockPush.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderLogoutAllButton() {
+    const { LogoutAllButton } = await import('@/components/logout-all-button');
+    return render(React.createElement(LogoutAllButton));
+  }
+
+  it('calls /api/auth/logout-all and router.replace("/") + router.refresh() on confirm', async () => {
+    vi.mocked(window.confirm).mockReturnValueOnce(true);
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderLogoutAllButton();
+    await user.click(screen.getByRole('button', { name: /cerrar sesión en todos/i }));
+
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith('/api/auth/logout-all', { method: 'POST' });
+      expect(mockReplace).toHaveBeenCalledWith('/');
+      expect(mockRefresh).toHaveBeenCalledOnce();
+    });
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it('does nothing if user cancels the confirmation', async () => {
+    vi.mocked(window.confirm).mockReturnValueOnce(false);
+
+    await renderLogoutAllButton();
+    await user.click(screen.getByRole('button', { name: /cerrar sesión en todos/i }));
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(mockReplace).not.toHaveBeenCalled();
+    expect(mockRefresh).not.toHaveBeenCalled();
+  });
+
+  it('redirects to "/" (not /login) on logout-all', async () => {
+    vi.mocked(window.confirm).mockReturnValueOnce(true);
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderLogoutAllButton();
+    await user.click(screen.getByRole('button', { name: /cerrar sesión en todos/i }));
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith('/');
+      expect(mockReplace).not.toHaveBeenCalledWith('/login');
+    });
+  });
+});
+
+// ─── Header ─────────────────────────────────────────────────────────────────
+
+// Mock next/headers for server component tests.
+vi.mock('next/headers', () => ({
+  cookies: vi.fn().mockResolvedValue({
+    get: () => undefined,
+  }),
+}));
+
+describe('Header', () => {
+  afterEach(() => {
+    vi.resetModules();
+    vi.restoreAllMocks();
+  });
+
+  it('renders "Mi cuenta" link when user is authenticated', async () => {
+    vi.doMock('@/lib/auth', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/lib/auth')>();
+      return {
+        ...actual,
+        getCurrentUser: vi.fn().mockResolvedValue({
+          id: 'u1', email: 'joan@example.com', firstName: 'Joan', lastName: 'Costa',
+        }),
+      };
+    });
+    vi.doMock('next/headers', () => ({
+      cookies: vi.fn().mockResolvedValue({ get: () => undefined }),
+    }));
+
+    const { Header } = await import('@/components/header');
+    const element = await Header();
+    render(element as React.ReactElement);
+
+    expect(screen.getByRole('link', { name: /mi cuenta/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /iniciar sesión/i })).not.toBeInTheDocument();
+  });
+
+  it('renders "Iniciar sesión" link when user is not authenticated', async () => {
+    vi.doMock('@/lib/auth', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/lib/auth')>();
+      return {
+        ...actual,
+        getCurrentUser: vi.fn().mockResolvedValue(null),
+      };
+    });
+    vi.doMock('next/headers', () => ({
+      cookies: vi.fn().mockResolvedValue({ get: () => undefined }),
+    }));
+
+    const { Header } = await import('@/components/header');
+    const element = await Header();
+    render(element as React.ReactElement);
+
+    expect(screen.getByRole('link', { name: /iniciar sesión/i })).toBeInTheDocument();
+    expect(screen.queryByRole('link', { name: /mi cuenta/i })).not.toBeInTheDocument();
+  });
+});
+
+// ─── Account page ────────────────────────────────────────────────────────────
+
+describe('AccountPage', () => {
+  afterEach(() => {
+    vi.resetModules();
+    mockRedirect.mockReset();
+    mockPush.mockReset();
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+  });
+
+  it('/account page redirects to /login when getCurrentUser returns null (session expired/revoked)', async () => {
+    // Mock the auth module so getCurrentUser returns null
+    vi.doMock('@/lib/auth', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/lib/auth')>();
+      return {
+        ...actual,
+        getCurrentUser: vi.fn().mockResolvedValue(null),
+      };
+    });
+
+    // Mock next/headers to return a dummy cookie store
+    vi.doMock('next/headers', () => ({
+      cookies: vi.fn().mockResolvedValue({ get: () => undefined }),
+    }));
+
+    // redirect() in Next.js throws internally; our mock just records the call.
+    mockRedirect.mockImplementation(() => { throw new Error('NEXT_REDIRECT'); });
+
+    const { default: AccountPage } = await import('@/app/account/page');
+
+    await expect(AccountPage()).rejects.toThrow('NEXT_REDIRECT');
+    expect(mockRedirect).toHaveBeenCalledWith('/login?next=/account');
+  });
+
+  it('LogoutAllButton renders in account page (button text present)', async () => {
+    const user = { id: 'uuid-test', email: 'test@example.com', firstName: 'Test', lastName: 'User' };
+
+    vi.doMock('@/lib/auth', async (importOriginal) => {
+      const actual = await importOriginal<typeof import('@/lib/auth')>();
+      return {
+        ...actual,
+        getCurrentUser: vi.fn().mockResolvedValue(user),
+      };
+    });
+
+    vi.doMock('next/headers', () => ({
+      cookies: vi.fn().mockResolvedValue({ get: () => undefined }),
+    }));
+
+    // redirect should not be called when user is present
+    mockRedirect.mockImplementation(() => { throw new Error('NEXT_REDIRECT'); });
+
+    const { default: AccountPage } = await import('@/app/account/page');
+
+    // AccountPage is an async server component — call it and render the result
+    const element = await AccountPage();
+    render(element as React.ReactElement);
+
+    expect(
+      screen.getByRole('button', { name: /cerrar sesión en todos los dispositivos/i }),
+    ).toBeInTheDocument();
   });
 });

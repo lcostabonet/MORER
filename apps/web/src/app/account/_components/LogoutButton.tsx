@@ -11,8 +11,10 @@ export function LogoutButton() {
     setLoading(true);
     try {
       await fetch('/api/auth/logout', { method: 'POST' });
+    } catch {
+      // Network error — navigate away regardless
     } finally {
-      router.push('/');
+      router.replace('/');
       router.refresh();
     }
   }

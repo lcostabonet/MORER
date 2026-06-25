@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
 import { LogoutButton } from './_components/LogoutButton';
+import { LogoutAllButton } from '@/components/logout-all-button';
 
 export const metadata: Metadata = {
   title: 'Mi cuenta',
@@ -75,6 +76,10 @@ export default async function AccountPage() {
         >
           Ir a la tienda →
         </Link>
+      </div>
+
+      <div className="mt-8">
+        <LogoutAllButton />
       </div>
     </div>
   );

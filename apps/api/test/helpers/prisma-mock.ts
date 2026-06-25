@@ -47,6 +47,11 @@ export type PrismaMock = {
     update: ReturnType<typeof vi.fn>;
     updateMany: ReturnType<typeof vi.fn>;
   };
+  authSession: {
+    findUnique: ReturnType<typeof vi.fn>;
+    create: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
+  };
   // The transactional client handed to $transaction callbacks. Exposed so tests
   // can assert/inspect the writes attempted inside a transaction.
   __tx: TxMock;
@@ -96,6 +101,11 @@ export function createPrismaMock(): PrismaMock {
       create: vi.fn().mockResolvedValue(null),
       update: vi.fn().mockResolvedValue(null),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    },
+    authSession: {
+      findUnique: vi.fn().mockResolvedValue(null),
+      create: vi.fn().mockResolvedValue(null),
+      updateMany: vi.fn().mockResolvedValue({ count: 0 }),
     },
     __tx: tx,
   };

@@ -15,8 +15,14 @@ import { ConflictException, UnauthorizedException } from '@nestjs/common';
 // and exercised without real crypto or a running NestJS application.
 
 vi.mock('bcryptjs', () => ({
+  default: {
+    hash: vi.fn(),
+    compare: vi.fn(),
+    hashSync: vi.fn().mockReturnValue('$2b$12$dummy_hash_for_timing'),
+  },
   hash: vi.fn(),
   compare: vi.fn(),
+  hashSync: vi.fn().mockReturnValue('$2b$12$dummy_hash_for_timing'),
 }));
 
 vi.mock('@nestjs/jwt', () => ({
@@ -28,12 +34,14 @@ vi.mock('@nestjs/jwt', () => ({
 import * as bcrypt from 'bcryptjs';
 import { JwtService } from '@nestjs/jwt';
 import { AuthService } from '../src/auth/auth.service';
+import { JwtStrategy } from '../src/auth/strategies/jwt.strategy';
 import { asPrismaService, createPrismaMock } from './helpers/prisma-mock';
 import type { PrismaMock } from './helpers/prisma-mock';
 
 // ─── Fixtures ─────────────────────────────────────────────────────────────────
 
 const CUSTOMER_ID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+const SESSION_ID = 'b2c3d4e5-f6a7-8901-bcde-f12345678901';
 const EMAIL = 'User@Example.COM';
 const EMAIL_NORMALIZED = 'user@example.com';
 const EMAIL_TRIMMED = 'User@Example.COM';
@@ -72,6 +80,8 @@ describe('AuthService', () => {
 
   beforeEach(() => {
     process.env.JWT_SECRET = 'test-secret';
+    process.env.JWT_ISSUER = 'test-issuer';
+    process.env.JWT_AUDIENCE = 'test-audience';
 
     prismaMock = createPrismaMock();
     jwtService = new JwtService();
@@ -85,6 +95,11 @@ describe('AuthService', () => {
     prismaMock.customer.update.mockReset().mockResolvedValue(null);
     prismaMock.customer.updateMany.mockReset().mockResolvedValue({ count: 1 });
 
+    // Reset authSession mock fns
+    prismaMock.authSession.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.authSession.create.mockReset().mockResolvedValue(null);
+    prismaMock.authSession.updateMany.mockReset().mockResolvedValue({ count: 1 });
+
     // Default bcrypt behaviour
     vi.mocked(bcrypt.hash).mockResolvedValue(PASSWORD_HASH as never);
     vi.mocked(bcrypt.compare).mockResolvedValue(true as never);
@@ -93,6 +108,8 @@ describe('AuthService', () => {
   afterEach(() => {
     vi.clearAllMocks();
     delete process.env.JWT_SECRET;
+    delete process.env.JWT_ISSUER;
+    delete process.env.JWT_AUDIENCE;
   });
 
   // ─── register ───────────────────────────────────────────────────────────────
@@ -236,10 +253,69 @@ describe('AuthService', () => {
       expect(result).toHaveProperty('accessToken', 'mock-jwt-token');
       expect(result.customer).toEqual(profileFixture());
       expect(result.customer).not.toHaveProperty('passwordHash');
+      // JWT must carry sub and sid but NOT email
       expect(jwtService.sign).toHaveBeenCalledWith(
-        { sub: CUSTOMER_ID, email: EMAIL_TRIMMED },
-        { secret: 'test-secret', expiresIn: '7d' },
+        expect.objectContaining({ sub: CUSTOMER_ID }),
+        expect.objectContaining({ secret: 'test-secret', expiresIn: '7d' }),
       );
+      const signCall = vi.mocked(jwtService.sign).mock.calls[0][0] as Record<string, unknown>;
+      expect(signCall).not.toHaveProperty('email');
+      expect(typeof signCall['sid']).toBe('string');
+    });
+
+    it('login() creates an AuthSession with correct shape', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      vi.mocked(bcrypt.compare).mockResolvedValue(true as never);
+
+      await service.login({ email: EMAIL, password: PASSWORD });
+
+      expect(prismaMock.authSession.create).toHaveBeenCalledOnce();
+      expect(prismaMock.authSession.create).toHaveBeenCalledWith({
+        data: {
+          id: expect.any(String),
+          customerId: CUSTOMER_ID,
+          expiresAt: expect.any(Date),
+        },
+      });
+    });
+
+    it('login() JWT payload contains sub and sid but NOT email', async () => {
+      // jwtService.sign is mocked; inspect the payload argument directly —
+      // no need to decode a real token.
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      vi.mocked(bcrypt.compare).mockResolvedValue(true as never);
+
+      await service.login({ email: EMAIL, password: PASSWORD });
+
+      const signPayload = vi.mocked(jwtService.sign).mock.calls[0][0] as Record<string, unknown>;
+      expect(signPayload['sub']).toBe(CUSTOMER_ID);
+      expect(typeof signPayload['sid']).toBe('string');
+      expect(signPayload['email']).toBeUndefined();
+    });
+
+    it('timing mitigation — user not found: bcrypt.compare is still called, then 401', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(null);
+      // compare must be called with the dummy hash regardless
+      vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
+
+      await expect(
+        service.login({ email: 'nobody@example.com', password: PASSWORD }),
+      ).rejects.toThrow(new UnauthorizedException('Invalid credentials'));
+
+      expect(bcrypt.compare).toHaveBeenCalledOnce();
+    });
+
+    it('timing mitigation — guest customer (passwordHash null): bcrypt.compare is still called, then 401', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ passwordHash: null, registeredAt: null }),
+      );
+      vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
+
+      await expect(
+        service.login({ email: EMAIL, password: PASSWORD }),
+      ).rejects.toThrow(new UnauthorizedException('Invalid credentials'));
+
+      expect(bcrypt.compare).toHaveBeenCalledOnce();
     });
 
     it('throws UnauthorizedException with generic message when password is wrong', async () => {
@@ -251,26 +327,82 @@ describe('AuthService', () => {
       ).rejects.toThrow(new UnauthorizedException('Invalid credentials'));
     });
 
-    it('throws UnauthorizedException with same generic message when customer does not exist', async () => {
-      prismaMock.customer.findUnique.mockResolvedValue(null);
+    it('login() failure (wrong password) does NOT call prisma.authSession.create', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
 
       await expect(
-        service.login({ email: 'nobody@example.com', password: PASSWORD }),
-      ).rejects.toThrow(new UnauthorizedException('Invalid credentials'));
+        service.login({ email: EMAIL, password: 'wrongpassword' }),
+      ).rejects.toThrow(UnauthorizedException);
 
-      expect(bcrypt.compare).not.toHaveBeenCalled();
+      expect(prismaMock.authSession.create).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── logout ─────────────────────────────────────────────────────────────────
+
+  describe('logout', () => {
+    it('calls prisma.authSession.updateMany with WHERE { id, customerId, revokedAt: null }', async () => {
+      prismaMock.authSession.updateMany.mockResolvedValue({ count: 1 });
+
+      await service.logout(CUSTOMER_ID, SESSION_ID);
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledOnce();
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledWith({
+        where: { id: SESSION_ID, customerId: CUSTOMER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
     });
 
-    it('throws UnauthorizedException when customer exists but has no passwordHash (guest account)', async () => {
-      prismaMock.customer.findUnique.mockResolvedValue(
-        registeredCustomerFixture({ passwordHash: null, registeredAt: null }),
-      );
+    it('is idempotent: second call with already-revoked session does not throw', async () => {
+      prismaMock.authSession.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 });
 
-      await expect(
-        service.login({ email: EMAIL, password: PASSWORD }),
-      ).rejects.toThrow(new UnauthorizedException('Invalid credentials'));
+      await service.logout(CUSTOMER_ID, SESSION_ID);
+      await service.logout(CUSTOMER_ID, SESSION_ID); // second call — no error
 
-      expect(bcrypt.compare).not.toHaveBeenCalled();
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledTimes(2);
+    });
+  });
+
+  // ─── logoutAll ──────────────────────────────────────────────────────────────
+
+  describe('logoutAll', () => {
+    it('calls prisma.authSession.updateMany with WHERE { customerId, revokedAt: null }', async () => {
+      prismaMock.authSession.updateMany.mockResolvedValue({ count: 2 });
+
+      await service.logoutAll(CUSTOMER_ID);
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledOnce();
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('two sessions: logoutAll revokes all; logout revokes only the specified one', async () => {
+      const OTHER_SESSION_ID = 'c3d4e5f6-a7b8-9012-cdef-123456789012';
+
+      // logoutAll — both sessions revoked
+      prismaMock.authSession.updateMany.mockResolvedValueOnce({ count: 2 });
+      await service.logoutAll(CUSTOMER_ID);
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenLastCalledWith({
+        where: { customerId: CUSTOMER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+
+      // logout — only one session targeted
+      prismaMock.authSession.updateMany.mockResolvedValueOnce({ count: 1 });
+      await service.logout(CUSTOMER_ID, OTHER_SESSION_ID);
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenLastCalledWith({
+        where: { id: OTHER_SESSION_ID, customerId: CUSTOMER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledTimes(2);
     });
   });
 
@@ -306,7 +438,7 @@ describe('AuthService', () => {
     it('register and login routes are decorated with @UseGuards(ThrottlerGuard)', async () => {
       // This is a code-level structural check. We import the controller metadata
       // reflectively to confirm ThrottlerGuard is applied without spinning up
-      // a full NestJS app.
+      // a full NestJS application.
       //
       // Reflect is available in Node because NestJS decorators use the
       // reflect-metadata polyfill. However, esbuild (used by Vitest) strips
@@ -337,5 +469,162 @@ describe('AuthService', () => {
         expect(true).toBe(true);
       }
     });
+  });
+});
+
+// ─── JwtStrategy tests ────────────────────────────────────────────────────────
+
+describe('JwtStrategy.validate()', () => {
+  // JwtStrategy extends PassportStrategy which calls super() with options.
+  // We set all required env vars before each instantiation.
+
+  const CUSTOMER_ID = 'a1b2c3d4-e5f6-7890-abcd-ef1234567890';
+  const SESSION_ID = 'b2c3d4e5-f6a7-8901-bcde-f12345678901';
+
+  function makeSession(overrides: Record<string, unknown> = {}) {
+    return {
+      id: SESSION_ID,
+      customerId: CUSTOMER_ID,
+      expiresAt: new Date(Date.now() + 60 * 60 * 1000), // 1 h from now
+      revokedAt: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      ...overrides,
+    };
+  }
+
+  function makeCustomer(overrides: Record<string, unknown> = {}) {
+    return {
+      id: CUSTOMER_ID,
+      email: 'user@example.com',
+      firstName: 'Joan',
+      lastName: 'Costa',
+      passwordHash: '$2b$12$hashedvalue',
+      registeredAt: new Date('2026-01-01T00:00:00Z'),
+      ...overrides,
+    };
+  }
+
+  function validPayload() {
+    return { sub: CUSTOMER_ID, sid: SESSION_ID, iat: 0, exp: 9_999_999_999 };
+  }
+
+  let mockPrisma: {
+    authSession: { findUnique: ReturnType<typeof vi.fn> };
+    customer: { findUnique: ReturnType<typeof vi.fn> };
+  };
+  let strategy: JwtStrategy;
+
+  beforeEach(() => {
+    process.env.JWT_SECRET = 'test-secret';
+    process.env.JWT_ISSUER = 'test-issuer';
+    process.env.JWT_AUDIENCE = 'test-audience';
+
+    mockPrisma = {
+      authSession: { findUnique: vi.fn() },
+      customer: { findUnique: vi.fn() },
+    };
+
+    // Default: valid session + valid customer
+    mockPrisma.authSession.findUnique.mockResolvedValue(makeSession());
+    mockPrisma.customer.findUnique.mockResolvedValue(makeCustomer());
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    strategy = new JwtStrategy(mockPrisma as any);
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_ISSUER;
+    delete process.env.JWT_AUDIENCE;
+  });
+
+  it('10. throws UnauthorizedException when payload has no sid field', async () => {
+    const payload = { sub: CUSTOMER_ID, iat: 0, exp: 9_999_999_999 } as unknown as ReturnType<typeof validPayload>;
+    await expect(strategy.validate(payload)).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('11. throws UnauthorizedException when session is not found', async () => {
+    mockPrisma.authSession.findUnique.mockResolvedValue(null);
+    await expect(strategy.validate(validPayload())).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('12. throws UnauthorizedException when session is revoked', async () => {
+    mockPrisma.authSession.findUnique.mockResolvedValue(
+      makeSession({ revokedAt: new Date('2026-01-01T00:00:00Z') }),
+    );
+    await expect(strategy.validate(validPayload())).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('13. throws UnauthorizedException when session is expired', async () => {
+    mockPrisma.authSession.findUnique.mockResolvedValue(
+      makeSession({ expiresAt: new Date(Date.now() - 1000) }),
+    );
+    await expect(strategy.validate(validPayload())).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('14. throws UnauthorizedException when session.customerId !== payload.sub', async () => {
+    mockPrisma.authSession.findUnique.mockResolvedValue(
+      makeSession({ customerId: 'different-customer-id' }),
+    );
+    await expect(strategy.validate(validPayload())).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('15. throws UnauthorizedException when customer is not found', async () => {
+    mockPrisma.customer.findUnique.mockResolvedValue(null);
+    await expect(strategy.validate(validPayload())).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('16. throws UnauthorizedException when customer is a guest (passwordHash null)', async () => {
+    mockPrisma.customer.findUnique.mockResolvedValue(
+      makeCustomer({ passwordHash: null }),
+    );
+    await expect(strategy.validate(validPayload())).rejects.toThrow(UnauthorizedException);
+  });
+
+  it('17. valid payload + active session: validate() returns AuthenticatedUser', async () => {
+    const result = await strategy.validate(validPayload());
+
+    expect(result).toEqual({
+      id: CUSTOMER_ID,
+      email: 'user@example.com',
+      firstName: 'Joan',
+      lastName: 'Costa',
+      sessionId: SESSION_ID,
+    });
+  });
+});
+
+// ─── JwtStrategy constructor tests ───────────────────────────────────────────
+
+describe('JwtStrategy constructor', () => {
+  const mockPrisma = {
+    authSession: { findUnique: vi.fn() },
+    customer: { findUnique: vi.fn() },
+  };
+
+  beforeEach(() => {
+    process.env.JWT_SECRET = 'test-secret';
+    process.env.JWT_ISSUER = 'test-issuer';
+    process.env.JWT_AUDIENCE = 'test-audience';
+  });
+
+  afterEach(() => {
+    delete process.env.JWT_SECRET;
+    delete process.env.JWT_ISSUER;
+    delete process.env.JWT_AUDIENCE;
+  });
+
+  it('18. throws Error containing JWT_ISSUER when JWT_ISSUER is missing', () => {
+    delete process.env.JWT_ISSUER;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => new JwtStrategy(mockPrisma as any)).toThrow(/JWT_ISSUER/);
+  });
+
+  it('19. throws Error containing JWT_AUDIENCE when JWT_AUDIENCE is missing', () => {
+    delete process.env.JWT_AUDIENCE;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    expect(() => new JwtStrategy(mockPrisma as any)).toThrow(/JWT_AUDIENCE/);
   });
 });

@@ -11,7 +11,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   if (token) {
     try {
       const apiUrl = getApiUrl();
-      await fetch(apiUrl + '/auth/logout', {
+      await fetch(apiUrl + '/auth/logout-all', {
         method: 'POST',
         headers: { Authorization: 'Bearer ' + token },
       });

@@ -70,7 +70,8 @@ export function RegisterForm() {
           setLoading(false);
           return;
         }
-        router.push('/account');
+        router.replace('/account');
+        router.refresh();
         return;
       }
 
