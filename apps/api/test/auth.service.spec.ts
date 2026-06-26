@@ -7,7 +7,7 @@ import {
   it,
   vi,
 } from 'vitest';
-import { ConflictException, UnauthorizedException } from '@nestjs/common';
+import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
 
 // ─── Module-level mocks (hoisted by Vitest) ───────────────────────────────────
 //
@@ -37,15 +37,44 @@ import { AuthService } from '../src/auth/auth.service';
 import { JwtStrategy } from '../src/auth/strategies/jwt.strategy';
 import { asPrismaService, createPrismaMock } from './helpers/prisma-mock';
 import type { PrismaMock } from './helpers/prisma-mock';
+
+// Extension type for passwordResetToken which is not in the base PrismaMock
+// (the base mock predates Phase 11B-alpha).
+type PrismaMockWithReset = PrismaMock & {
+  passwordResetToken: {
+    findUnique: ReturnType<typeof vi.fn>;
+    upsert: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
+  };
+};
+
+function createPrismaMockWithReset(): PrismaMockWithReset {
+  const base = createPrismaMock();
+  const extended = base as unknown as PrismaMockWithReset;
+  extended.passwordResetToken = {
+    findUnique: vi.fn().mockResolvedValue(null),
+    upsert: vi.fn().mockResolvedValue({}),
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+  };
+  // $transaction for resetPassword: pass the extended mock as the tx arg so
+  // passwordResetToken / customer / authSession delegates are available inside
+  // the transaction callback.
+  extended.$transaction = vi.fn().mockImplementation(
+    async (cb: (tx: unknown) => unknown) => cb(extended),
+  );
+  return extended;
+}
 // ─── EmailService mock factory ────────────────────────────────────────────────
 
 type EmailServiceMock = {
   sendWelcomeEmailIfNeeded: ReturnType<typeof vi.fn>;
+  sendPasswordResetEmail: ReturnType<typeof vi.fn>;
 };
 
 function createEmailServiceMock(): EmailServiceMock {
   return {
     sendWelcomeEmailIfNeeded: vi.fn().mockResolvedValue(undefined),
+    sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -85,7 +114,7 @@ function profileFixture(overrides: Record<string, unknown> = {}) {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('AuthService', () => {
-  let prismaMock: PrismaMock;
+  let prismaMock: PrismaMockWithReset;
   let jwtService: JwtService;
   let emailServiceMock: EmailServiceMock;
   let service: AuthService;
@@ -95,7 +124,7 @@ describe('AuthService', () => {
     process.env.JWT_ISSUER = 'test-issuer';
     process.env.JWT_AUDIENCE = 'test-audience';
 
-    prismaMock = createPrismaMock();
+    prismaMock = createPrismaMockWithReset();
     jwtService = new JwtService();
     emailServiceMock = createEmailServiceMock();
     service = new AuthService(
@@ -117,8 +146,14 @@ describe('AuthService', () => {
     prismaMock.authSession.create.mockReset().mockResolvedValue(null);
     prismaMock.authSession.updateMany.mockReset().mockResolvedValue({ count: 1 });
 
+    // Reset passwordResetToken mock fns
+    prismaMock.passwordResetToken.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.passwordResetToken.upsert.mockReset().mockResolvedValue({});
+    prismaMock.passwordResetToken.updateMany.mockReset().mockResolvedValue({ count: 1 });
+
     // Reset emailService mock
     emailServiceMock.sendWelcomeEmailIfNeeded.mockReset().mockResolvedValue(undefined);
+    emailServiceMock.sendPasswordResetEmail.mockReset().mockResolvedValue(undefined);
 
     // Default bcrypt behaviour
     vi.mocked(bcrypt.hash).mockResolvedValue(PASSWORD_HASH as never);
@@ -563,6 +598,264 @@ describe('AuthService', () => {
       ).rejects.toThrow(UnauthorizedException);
 
       expect(emailServiceMock.sendWelcomeEmailIfNeeded).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── forgotPassword ───────────────────────────────────────────────────────────
+
+  describe('forgotPassword', () => {
+    it('returns void and upserts token for real registered customer', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+
+      await service.forgotPassword(EMAIL);
+
+      expect(prismaMock.passwordResetToken.upsert).toHaveBeenCalledOnce();
+      const call = prismaMock.passwordResetToken.upsert.mock.calls[0][0] as {
+        where: { customerId: string };
+        create: { customerId: string; tokenHash: string; expiresAt: Date };
+        update: { tokenHash: string; expiresAt: Date; usedAt: null };
+      };
+      expect(call.where.customerId).toBe(CUSTOMER_ID);
+      expect(call.create.customerId).toBe(CUSTOMER_ID);
+      expect(call.update.usedAt).toBeNull();
+      expect(emailServiceMock.sendPasswordResetEmail).toHaveBeenCalledOnce();
+    });
+
+    it('stores SHA-256 hash not raw token in upsert', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+
+      await service.forgotPassword(EMAIL);
+
+      const call = prismaMock.passwordResetToken.upsert.mock.calls[0][0] as {
+        create: { tokenHash: string };
+        update: { tokenHash: string };
+      };
+      // A SHA-256 hex digest is always exactly 64 hex characters.
+      expect(call.create.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(call.update.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      // The hash stored must equal the update tokenHash (same value for both arms).
+      expect(call.create.tokenHash).toBe(call.update.tokenHash);
+    });
+
+    it('returns void for unknown email without calling upsert or email service', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(null);
+
+      await service.forgotPassword('nobody@example.com');
+
+      expect(prismaMock.passwordResetToken.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendPasswordResetEmail).not.toHaveBeenCalled();
+    });
+
+    it('returns void for guest customer (passwordHash null)', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ passwordHash: null }),
+      );
+
+      await service.forgotPassword(EMAIL);
+
+      expect(prismaMock.passwordResetToken.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendPasswordResetEmail).not.toHaveBeenCalled();
+    });
+
+    it('returns void for anon-* email', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ email: 'anon-abc123@morer-checkout.local' }),
+      );
+
+      await service.forgotPassword('anon-abc123@morer-checkout.local');
+
+      expect(prismaMock.passwordResetToken.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendPasswordResetEmail).not.toHaveBeenCalled();
+    });
+
+    it('normalizes email to lowercase before lookup', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+
+      await service.forgotPassword('User@EXAMPLE.com');
+
+      expect(prismaMock.customer.findUnique).toHaveBeenCalledWith({
+        where: { emailNormalized: 'user@example.com' },
+      });
+    });
+
+    it('second request replaces token — upsert update path sets usedAt: null', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+
+      // First request
+      await service.forgotPassword(EMAIL);
+      // Second request
+      await service.forgotPassword(EMAIL);
+
+      expect(prismaMock.passwordResetToken.upsert).toHaveBeenCalledTimes(2);
+      // Both calls must carry usedAt: null in the update arm to clear any prior use.
+      for (const [callArgs] of prismaMock.passwordResetToken.upsert.mock.calls) {
+        const args = callArgs as { update: { usedAt: null } };
+        expect(args.update.usedAt).toBeNull();
+      }
+    });
+
+    it('does not throw when sendPasswordResetEmail rejects', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      emailServiceMock.sendPasswordResetEmail.mockRejectedValue(new Error('Resend down'));
+
+      await expect(service.forgotPassword(EMAIL)).resolves.toBeUndefined();
+    });
+  });
+
+  // ─── resetPassword ────────────────────────────────────────────────────────────
+
+  describe('resetPassword', () => {
+    const RAW_TOKEN = 'valid-raw-token-for-reset';
+    const NEW_PASSWORD = 'newpassword456';
+    const NEW_HASH = '$2b$12$newhash';
+    const TOKEN_RECORD_ID = 'tok-id-001';
+
+    function validResetRecord(overrides: Record<string, unknown> = {}) {
+      return {
+        id: TOKEN_RECORD_ID,
+        customerId: CUSTOMER_ID,
+        tokenHash: 'will-be-computed',
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000), // 30 min from now
+        usedAt: null,
+        customer: {
+          id: CUSTOMER_ID,
+          passwordHash: PASSWORD_HASH,
+          registeredAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      vi.mocked(bcrypt.hash).mockResolvedValue(NEW_HASH as never);
+    });
+
+    it('changes passwordHash on success', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(validResetRecord());
+      prismaMock.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+
+      await service.resetPassword(RAW_TOKEN, NEW_PASSWORD);
+
+      expect(prismaMock.customer.update).toHaveBeenCalledOnce();
+      const updateCall = prismaMock.customer.update.mock.calls[0][0] as {
+        where: { id: string };
+        data: { passwordHash: string };
+      };
+      expect(updateCall.where.id).toBe(CUSTOMER_ID);
+      expect(updateCall.data.passwordHash).toBe(NEW_HASH);
+    });
+
+    it('marks token as used (usedAt) on success', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(validResetRecord());
+      prismaMock.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+
+      await service.resetPassword(RAW_TOKEN, NEW_PASSWORD);
+
+      expect(prismaMock.passwordResetToken.updateMany).toHaveBeenCalledOnce();
+      const updateManyCall = prismaMock.passwordResetToken.updateMany.mock.calls[0][0] as {
+        data: { usedAt: Date };
+      };
+      expect(updateManyCall.data.usedAt).toBeInstanceOf(Date);
+    });
+
+    it('revokes all active AuthSessions on success', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(validResetRecord());
+      prismaMock.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+      prismaMock.authSession.updateMany.mockResolvedValue({ count: 2 });
+
+      await service.resetPassword(RAW_TOKEN, NEW_PASSWORD);
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledOnce();
+      const sessionCall = prismaMock.authSession.updateMany.mock.calls[0][0] as {
+        where: { customerId: string; revokedAt: null };
+        data: { revokedAt: Date };
+      };
+      expect(sessionCall.where.customerId).toBe(CUSTOMER_ID);
+      expect(sessionCall.where.revokedAt).toBeNull();
+      expect(sessionCall.data.revokedAt).toBeInstanceOf(Date);
+    });
+
+    it('throws BadRequestException for unknown tokenHash', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(null);
+
+      await expect(
+        service.resetPassword(RAW_TOKEN, NEW_PASSWORD),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when usedAt is set (token already used)', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(
+        validResetRecord({ usedAt: new Date('2026-01-01T00:00:00Z') }),
+      );
+
+      await expect(
+        service.resetPassword(RAW_TOKEN, NEW_PASSWORD),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when expired (expiresAt < now)', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(
+        validResetRecord({ expiresAt: new Date(Date.now() - 1000) }),
+      );
+
+      await expect(
+        service.resetPassword(RAW_TOKEN, NEW_PASSWORD),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when customer has no passwordHash (guest)', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(
+        validResetRecord({ customer: { id: CUSTOMER_ID, passwordHash: null, registeredAt: new Date() } }),
+      );
+
+      await expect(
+        service.resetPassword(RAW_TOKEN, NEW_PASSWORD),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('concurrent reset: second updateMany count 0 → throws BadRequestException', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(validResetRecord());
+      // First call: consumed successfully; second call: already consumed (count 0).
+      prismaMock.passwordResetToken.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 });
+      prismaMock.customer.update.mockResolvedValue({});
+      prismaMock.authSession.updateMany.mockResolvedValue({ count: 0 });
+
+      // First call succeeds
+      await service.resetPassword(RAW_TOKEN, NEW_PASSWORD);
+
+      // Second call — token already consumed, $transaction will throw
+      await expect(
+        service.resetPassword(RAW_TOKEN, NEW_PASSWORD),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('does not create an AuthSession during reset', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(validResetRecord());
+      prismaMock.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+      prismaMock.authSession.updateMany.mockResolvedValue({ count: 1 });
+
+      await service.resetPassword(RAW_TOKEN, NEW_PASSWORD);
+
+      expect(prismaMock.authSession.create).not.toHaveBeenCalled();
+    });
+
+    it('transaction rolls back if customer.update throws — UnauthorizedException propagates', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue(validResetRecord());
+      prismaMock.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockRejectedValue(new Error('DB error'));
+
+      await expect(
+        service.resetPassword(RAW_TOKEN, NEW_PASSWORD),
+      ).rejects.toThrow('DB error');
+
+      // authSession.updateMany should not have been reached after customer.update threw
+      expect(prismaMock.authSession.updateMany).not.toHaveBeenCalled();
     });
   });
 });

@@ -135,6 +135,7 @@ model Customer {
   carts    Cart[]
   orders   Order[]
   sessions AuthSession[]
+  passwordResetToken PasswordResetToken?
 
   @@map("customers")
 }
@@ -294,4 +295,19 @@ model AuthSession {
   @@index([customerId, revokedAt])
   @@index([expiresAt])
   @@map("auth_sessions")
+}
+
+model PasswordResetToken {
+  id         String    @id @default(cuid())
+  customerId String    @unique
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("password_reset_tokens")
 }

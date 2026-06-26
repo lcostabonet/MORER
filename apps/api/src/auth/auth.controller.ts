@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   Body,
   Controller,
   Get,
@@ -9,10 +10,12 @@ import {
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
+import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
+import { ResetPasswordDto } from './dto/reset-password.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 interface AuthenticatedRequest {
@@ -64,6 +67,37 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   async logoutAll(@Request() req: AuthenticatedRequest) {
     await this.authService.logoutAll(req.user.id);
+    return { success: true };
+  }
+
+  @Post('forgot-password')
+  @HttpCode(200)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 5 } })
+  @UsePipes(new ValidationPipe({ whitelist: true }))
+  async forgotPassword(@Body() dto: ForgotPasswordDto) {
+    try {
+      await this.authService.forgotPassword(dto.email);
+    } catch {
+      // swallow — always return generic response
+    }
+    return {
+      success: true,
+      message:
+        'Si existe una cuenta asociada a ese correo, recibirás instrucciones para restablecer la contraseña.',
+    };
+  }
+
+  @Post('reset-password')
+  @HttpCode(200)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 10 } })
+  @UsePipes(new ValidationPipe({ whitelist: true }))
+  async resetPassword(@Body() dto: ResetPasswordDto) {
+    if (dto.password !== dto.passwordConfirmation) {
+      throw new BadRequestException('Las contraseñas no coinciden.');
+    }
+    await this.authService.resetPassword(dto.token, dto.password);
     return { success: true };
   }
 }

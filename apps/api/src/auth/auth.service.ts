@@ -1,4 +1,5 @@
 import {
+  BadRequestException,
   ConflictException,
   Injectable,
   Logger,
@@ -6,7 +7,7 @@ import {
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
 import * as bcrypt from 'bcryptjs';
-import { randomUUID } from 'crypto';
+import { createHash, randomBytes, randomUUID } from 'crypto';
 import { EmailService } from '../email/email.service';
 import { PrismaService } from '../database/prisma.service';
 import type { LoginDto } from './dto/login.dto';
@@ -55,6 +56,7 @@ import type { RegisterDto } from './dto/register.dto';
 // ─────────────────────────────────────────────────────────────────────────────
 
 const BCRYPT_ROUNDS = 12;
+const RESET_TOKEN_EXPIRY_MS = 30 * 60 * 1000;
 const JWT_EXPIRY = '7d';
 
 // Computed once at startup to provide constant-time comparison when the
@@ -156,8 +158,47 @@ interface PrismaWithSessions {
         lastName?: string | null;
       };
     }): Promise<{ count: number }>;
+    update(args: {
+      where: { id: string };
+      data: { passwordHash: string };
+    }): Promise<unknown>;
   };
   authSession: AuthSessionModel;
+  passwordResetToken: {
+    upsert(args: {
+      where: { customerId: string };
+      create: { customerId: string; tokenHash: string; expiresAt: Date };
+      update: { tokenHash: string; expiresAt: Date; usedAt: null };
+    }): Promise<unknown>;
+    findUnique(args: {
+      where: { tokenHash: string };
+      include: {
+        customer: {
+          select: { id: true; passwordHash: true; registeredAt: true };
+        };
+      };
+    }): Promise<{
+      id: string;
+      customerId: string;
+      tokenHash: string;
+      expiresAt: Date;
+      usedAt: Date | null;
+      customer: {
+        id: string;
+        passwordHash: string | null;
+        registeredAt: Date | null;
+      } | null;
+    } | null>;
+    updateMany(args: {
+      where: {
+        id: string;
+        tokenHash: string;
+        usedAt: null;
+        expiresAt: { gt: Date };
+      };
+      data: { usedAt: Date };
+    }): Promise<{ count: number }>;
+  };
 }
 // ─────────────────────────────────────────────────────────────────────────────
 
@@ -399,5 +440,96 @@ export class AuthService {
     }
 
     return customer;
+  }
+
+  async forgotPassword(email: string): Promise<void> {
+    const normalized = email.trim().toLowerCase();
+
+    const customer = await this.db.customer.findUnique({
+      where: { emailNormalized: normalized },
+    });
+
+    // Return silently for all ineligible cases — never reveal account existence.
+    if (!customer) return;
+    if (!customer.passwordHash) return;
+    if (!customer.registeredAt) return;
+    if (/^anon-/i.test(customer.email) || customer.email.endsWith('@morer-checkout.local')) return;
+
+    const rawToken = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + RESET_TOKEN_EXPIRY_MS);
+
+    await this.db.passwordResetToken.upsert({
+      where: { customerId: customer.id },
+      create: { customerId: customer.id, tokenHash, expiresAt },
+      update: { tokenHash, expiresAt, usedAt: null },
+    });
+
+    const webUrl = process.env.WEB_URL ?? 'https://morer.com';
+    const resetUrl = webUrl + '/reset-password?token=' + encodeURIComponent(rawToken);
+
+    try {
+      await this.emailService.sendPasswordResetEmail({
+        customerId: customer.id,
+        email: customer.email,
+        firstName: customer.firstName,
+        resetUrl,
+      });
+    } catch {
+      // Email failure must not surface to the caller.
+      this.logger.warn('password-reset-email-error', { customerId: customer.id });
+    }
+  }
+
+  async resetPassword(rawToken: string, newPassword: string): Promise<void> {
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const now = new Date();
+
+    const resetRecord = await this.db.passwordResetToken.findUnique({
+      where: { tokenHash },
+      include: {
+        customer: { select: { id: true, passwordHash: true, registeredAt: true } },
+      },
+    });
+
+    const INVALID_MSG = 'El enlace de recuperación no es válido o ha caducado.';
+
+    if (!resetRecord) throw new BadRequestException(INVALID_MSG);
+    if (resetRecord.usedAt) throw new BadRequestException(INVALID_MSG);
+    if (resetRecord.expiresAt <= now) throw new BadRequestException(INVALID_MSG);
+    if (!resetRecord.customer?.passwordHash) throw new BadRequestException(INVALID_MSG);
+    if (!resetRecord.customer?.registeredAt) throw new BadRequestException(INVALID_MSG);
+
+    // Hash outside the transaction — bcrypt is expensive and must not block the tx.
+    const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+
+    await (this._db as {
+      $transaction(fn: (tx: PrismaWithSessions) => Promise<void>): Promise<void>;
+    }).$transaction(async (tx) => {
+      // Atomic consume — re-check conditions inside the transaction.
+      const consumed = await tx.passwordResetToken.updateMany({
+        where: {
+          id: resetRecord.id,
+          tokenHash,
+          usedAt: null,
+          expiresAt: { gt: now },
+        },
+        data: { usedAt: now },
+      });
+
+      if (consumed.count !== 1) {
+        throw new BadRequestException(INVALID_MSG);
+      }
+
+      await tx.customer.update({
+        where: { id: resetRecord.customerId },
+        data: { passwordHash: newHash },
+      });
+
+      await tx.authSession.updateMany({
+        where: { customerId: resetRecord.customerId, revokedAt: null },
+        data: { revokedAt: now },
+      });
+    });
   }
 }

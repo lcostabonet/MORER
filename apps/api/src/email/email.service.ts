@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OrderStatus } from '@morer/database';
 import { Resend } from 'resend';
-import { renderOrderConfirmation, renderShippingConfirmation, renderWelcome } from '@morer/emails';
+import { renderOrderConfirmation, renderPasswordReset, renderShippingConfirmation, renderWelcome } from '@morer/emails';
 import { PrismaService } from '../database/prisma.service';
 
 const CURRENCY = 'EUR';
@@ -414,6 +414,56 @@ export class EmailService {
       await this.prisma.customer.updateMany({
         where: { id: customerId, welcomeEmailSentAt: null, welcomeEmailSendingAt: claimedAt },
         data: { welcomeEmailSendingAt: null },
+      });
+    }
+  }
+
+  /**
+   * Sends a password-reset email to the customer.
+   *
+   * Does NOT use an atomic claim — each forgot-password request intentionally
+   * replaces the previous token, so there is no need to deduplicate sends.
+   * Failures are logged but never rethrown so the caller always gets a
+   * consistent (silent) response regardless of email delivery.
+   *
+   * Never logs PII: email, firstName, resetUrl, or the raw token are excluded
+   * from all log lines.
+   */
+  async sendPasswordResetEmail(params: {
+    customerId: string;
+    email: string;
+    firstName: string | null;
+    resetUrl: string;
+  }): Promise<void> {
+    try {
+      const html = await renderPasswordReset({
+        firstName: params.firstName,
+        resetUrl: params.resetUrl,
+      });
+
+      const { error } = await this.resend.emails.send({
+        from: this.fromAddress,
+        to: params.email,
+        subject: 'Restablece tu contraseña de MORER',
+        html,
+      });
+
+      if (error) {
+        const code = (error as unknown as Record<string, unknown>)['name'] ?? 'UNKNOWN';
+        console.warn(`[email] Provider error sending password-reset email`, {
+          customerId: params.customerId,
+          code,
+        });
+        return;
+      }
+
+      console.log(`[email] Password-reset email sent — customer: ${params.customerId}`);
+    } catch (err) {
+      const code =
+        err instanceof Error ? err.name : 'UNKNOWN';
+      console.warn(`[email] Failed to send password-reset email`, {
+        customerId: params.customerId,
+        code,
       });
     }
   }

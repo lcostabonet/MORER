@@ -7,17 +7,19 @@ export const metadata: Metadata = {
 };
 
 interface PageProps {
-  searchParams: Promise<{ next?: string }>;
+  searchParams: Promise<{ next?: string; reset?: string }>;
 }
 
 export default async function LoginPage({ searchParams }: PageProps) {
-  const { next } = await searchParams;
+  const { next, reset } = await searchParams;
 
   // Validate redirect server-side too — only pass safe paths to client
   const safeNext =
     typeof next === 'string' && next.startsWith('/') && !next.startsWith('//')
       ? next
       : null;
+
+  const resetSuccess = reset === '1';
 
   return (
     <div className="max-w-md mx-auto px-4 sm:px-6 py-24">
@@ -27,7 +29,7 @@ export default async function LoginPage({ searchParams }: PageProps) {
       <p className="text-sm text-stone-500 mb-10 leading-relaxed">
         Accede a tu cuenta para ver tus pedidos y gestionar tu perfil.
       </p>
-      <LoginForm next={safeNext} />
+      <LoginForm next={safeNext} resetSuccess={resetSuccess} />
     </div>
   );
 }

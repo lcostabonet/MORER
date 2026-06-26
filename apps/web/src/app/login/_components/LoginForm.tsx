@@ -10,9 +10,10 @@ type FormError = 'invalid_credentials' | 'too_many_requests' | 'service_error' |
 
 interface LoginFormProps {
   next: string | null;
+  resetSuccess?: boolean;
 }
 
-export function LoginForm({ next }: LoginFormProps) {
+export function LoginForm({ next, resetSuccess }: LoginFormProps) {
   const router = useRouter();
 
   const [email, setEmail] = useState('');
@@ -72,6 +73,15 @@ export function LoginForm({ next }: LoginFormProps) {
 
   return (
     <form onSubmit={handleSubmit} noValidate className="space-y-5">
+      {/* Reset success banner */}
+      {resetSuccess && (
+        <div className="bg-stone-50 border border-stone-200 rounded-sm p-4" role="status">
+          <p className="text-sm text-stone-700">
+            Contraseña actualizada. Inicia sesión de nuevo.
+          </p>
+        </div>
+      )}
+
       {/* Error banner */}
       <div aria-live="polite" aria-atomic="true">
         {formError === 'invalid_credentials' && (
@@ -125,12 +135,20 @@ export function LoginForm({ next }: LoginFormProps) {
 
       {/* Password */}
       <div>
-        <label
-          htmlFor="login-password"
-          className="block text-xs font-medium tracking-[0.1em] uppercase text-stone-600 mb-2"
-        >
-          Contraseña
-        </label>
+        <div className="flex items-center justify-between mb-2">
+          <label
+            htmlFor="login-password"
+            className="block text-xs font-medium tracking-[0.1em] uppercase text-stone-600"
+          >
+            Contraseña
+          </label>
+          <Link
+            href="/forgot-password"
+            className="text-xs text-stone-500 underline underline-offset-2 hover:text-stone-700 transition-colors"
+          >
+            ¿Has olvidado tu contraseña?
+          </Link>
+        </div>
         <input
           id="login-password"
           type="password"

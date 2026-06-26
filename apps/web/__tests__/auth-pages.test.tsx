@@ -380,6 +380,371 @@ describe('LoginForm', () => {
     // Must use replace, not push, to prevent the login page from stacking in history
     expect(mockPush).not.toHaveBeenCalled();
   });
+
+  it('renders a link to /forgot-password', async () => {
+    await renderLoginForm();
+
+    // The LoginForm renders a "¿Has olvidado tu contraseña?" link pointing to /forgot-password
+    const forgotLink = screen.getByRole('link', { name: /olvidado tu contraseña/i });
+    expect(forgotLink).toBeInTheDocument();
+    expect(forgotLink).toHaveAttribute('href', '/forgot-password');
+  });
+});
+
+// ─── ForgotPasswordForm ──────────────────────────────────────────────────────
+
+describe('ForgotPasswordForm', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+    mockPush.mockReset();
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderForgotPasswordForm() {
+    const { ForgotPasswordForm } = await import(
+      '@/app/forgot-password/_components/ForgotPasswordForm'
+    );
+    return render(React.createElement(ForgotPasswordForm));
+  }
+
+  it('renders email field with autocomplete=email', async () => {
+    await renderForgotPasswordForm();
+    const input = screen.getByLabelText(/email/i);
+    expect(input).toBeInTheDocument();
+    expect(input).toHaveAttribute('autocomplete', 'email');
+  });
+
+  it('shows inline error on blur with invalid email format', async () => {
+    await renderForgotPasswordForm();
+
+    const input = screen.getByLabelText(/email/i);
+    await user.click(input);
+    await user.type(input, 'not-an-email');
+    await user.tab(); // trigger blur
+
+    expect(await screen.findByText(/email válido/i)).toBeInTheDocument();
+  });
+
+  it('submit button is disabled when email field is empty', async () => {
+    await renderForgotPasswordForm();
+
+    const btn = screen.getByRole('button', { name: /enviar instrucciones/i });
+    expect(btn).toBeDisabled();
+  });
+
+  it('shows loading state while submitting', async () => {
+    let resolveFetch!: (value: Response) => void;
+    const fetchPromise = new Promise<Response>((resolve) => {
+      resolveFetch = resolve;
+    });
+    vi.mocked(fetch).mockReturnValueOnce(fetchPromise);
+
+    await renderForgotPasswordForm();
+
+    const input = screen.getByLabelText(/email/i);
+    await user.type(input, 'user@example.com');
+    await user.click(screen.getByRole('button', { name: /enviar instrucciones/i }));
+
+    expect(screen.getByRole('button', { name: /enviando/i })).toBeInTheDocument();
+
+    resolveFetch(new Response(JSON.stringify({ success: true }), { status: 200 }));
+    await waitFor(() => {
+      expect(screen.queryByRole('button', { name: /enviando/i })).not.toBeInTheDocument();
+    });
+  });
+
+  it('shows generic success message after API success (200)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderForgotPasswordForm();
+
+    await user.type(screen.getByLabelText(/email/i), 'user@example.com');
+    await user.click(screen.getByRole('button', { name: /enviar instrucciones/i }));
+
+    // Generic message — same regardless of whether account exists
+    expect(
+      await screen.findByText(/si existe una cuenta/i),
+    ).toBeInTheDocument();
+  });
+
+  it('shows same generic success message even when API returns an error (503)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Service error' }), { status: 503 }),
+    );
+
+    await renderForgotPasswordForm();
+
+    await user.type(screen.getByLabelText(/email/i), 'user@example.com');
+    await user.click(screen.getByRole('button', { name: /enviar instrucciones/i }));
+
+    // Same generic message — never reveals whether account exists
+    expect(
+      await screen.findByText(/si existe una cuenta/i),
+    ).toBeInTheDocument();
+  });
+
+  it('shows same generic message even on network error (fetch rejects)', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('Network error'));
+
+    await renderForgotPasswordForm();
+
+    await user.type(screen.getByLabelText(/email/i), 'user@example.com');
+    await user.click(screen.getByRole('button', { name: /enviar instrucciones/i }));
+
+    expect(
+      await screen.findByText(/si existe una cuenta/i),
+    ).toBeInTheDocument();
+  });
+});
+
+// ─── ResetPasswordForm ────────────────────────────────────────────────────────
+
+describe('ResetPasswordForm', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+    mockPush.mockReset();
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderResetPasswordForm(token: string) {
+    const { ResetPasswordForm } = await import(
+      '@/app/reset-password/_components/ResetPasswordForm'
+    );
+    return render(React.createElement(ResetPasswordForm, { token }));
+  }
+
+  it('shows invalid link message when token prop is empty string', async () => {
+    await renderResetPasswordForm('');
+
+    expect(
+      screen.getByText(/enlace de recuperación no válido/i),
+    ).toBeInTheDocument();
+    // The form itself should not be rendered
+    expect(
+      screen.queryByRole('button', { name: /cambiar contraseña/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('renders password fields with autocomplete=new-password', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    // type=password inputs are not accessible via role="textbox" — use label query.
+    const newPasswordInput = screen.getByLabelText(/nueva contraseña/i);
+    const confirmInput = screen.getByLabelText(/confirmar contraseña/i);
+
+    expect(newPasswordInput).toHaveAttribute('autocomplete', 'new-password');
+    expect(confirmInput).toHaveAttribute('autocomplete', 'new-password');
+  });
+
+  it('shows validation error when passwords do not match', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    await user.type(screen.getByLabelText(/nueva contraseña/i), 'password123');
+    await user.type(screen.getByLabelText(/confirmar contraseña/i), 'different456');
+    await user.tab(); // blur confirm field
+
+    expect(
+      await screen.findByText(/contraseñas no coinciden/i),
+    ).toBeInTheDocument();
+  });
+
+  it('shows validation error when password is too short (< 8 chars)', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    const newPasswordInput = screen.getByLabelText(/nueva contraseña/i);
+    await user.type(newPasswordInput, 'short');
+    await user.tab(); // blur
+
+    expect(
+      await screen.findByText(/entre 8 y 72 caracteres/i),
+    ).toBeInTheDocument();
+  });
+
+  it("calls router.replace('/login?reset=1') and router.refresh() on API success", async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderResetPasswordForm('some-valid-token');
+
+    await user.type(screen.getByLabelText(/nueva contraseña/i), 'newpassword123');
+    await user.type(screen.getByLabelText(/confirmar contraseña/i), 'newpassword123');
+    await user.click(screen.getByRole('button', { name: /cambiar contraseña/i }));
+
+    await waitFor(() => {
+      expect(mockReplace).toHaveBeenCalledWith('/login?reset=1');
+      expect(mockRefresh).toHaveBeenCalledOnce();
+    });
+    expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  it('shows the exact invalid-token message on 400 response', async () => {
+    const EXPECTED = 'El enlace de recuperación no es válido o ha caducado.';
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: EXPECTED }), { status: 400 }),
+    );
+
+    await renderResetPasswordForm('some-valid-token');
+
+    await user.type(screen.getByLabelText(/nueva contraseña/i), 'newpassword123');
+    await user.type(screen.getByLabelText(/confirmar contraseña/i), 'newpassword123');
+    await user.click(screen.getByRole('button', { name: /cambiar contraseña/i }));
+
+    expect(await screen.findByText(EXPECTED)).toBeInTheDocument();
+  });
+
+  it('does not show "Unauthorized" when token is invalid', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: 'El enlace de recuperación no es válido o ha caducado.' }),
+        { status: 400 },
+      ),
+    );
+
+    await renderResetPasswordForm('used-token');
+
+    await user.type(screen.getByLabelText(/nueva contraseña/i), 'newpassword123');
+    await user.type(screen.getByLabelText(/confirmar contraseña/i), 'newpassword123');
+    await user.click(screen.getByRole('button', { name: /cambiar contraseña/i }));
+
+    await screen.findByText(/enlace de recuperación/i);
+    expect(screen.queryByText(/unauthorized/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/bad request/i)).not.toBeInTheDocument();
+  });
+
+  it('does not redirect to login when token is invalid', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: 'El enlace de recuperación no es válido o ha caducado.' }),
+        { status: 400 },
+      ),
+    );
+
+    await renderResetPasswordForm('expired-token');
+
+    await user.type(screen.getByLabelText(/nueva contraseña/i), 'newpassword123');
+    await user.type(screen.getByLabelText(/confirmar contraseña/i), 'newpassword123');
+    await user.click(screen.getByRole('button', { name: /cambiar contraseña/i }));
+
+    await screen.findByText(/enlace de recuperación/i);
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  // ── Show/hide passwords toggle ──────────────────────────────────────────────
+
+  it('starts with both fields hidden (type=password) and "Mostrar contraseñas"', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    expect(screen.getByLabelText(/nueva contraseña/i)).toHaveAttribute(
+      'type',
+      'password',
+    );
+    expect(screen.getByLabelText(/confirmar contraseña/i)).toHaveAttribute(
+      'type',
+      'password',
+    );
+    expect(screen.getByText('Mostrar contraseñas')).toBeInTheDocument();
+  });
+
+  it('reveals both fields, swaps label, and preserves typed values when toggled on', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    await user.type(screen.getByLabelText(/nueva contraseña/i), 'newpassword123');
+    await user.type(
+      screen.getByLabelText(/confirmar contraseña/i),
+      'newpassword123',
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: /mostrar las contraseñas/i }),
+    );
+
+    const newPasswordInput = screen.getByLabelText(/nueva contraseña/i);
+    const confirmInput = screen.getByLabelText(/confirmar contraseña/i);
+    expect(newPasswordInput).toHaveAttribute('type', 'text');
+    expect(confirmInput).toHaveAttribute('type', 'text');
+    expect(screen.getByText('Ocultar contraseñas')).toBeInTheDocument();
+    // Values are not cleared by toggling visibility
+    expect(newPasswordInput).toHaveValue('newpassword123');
+    expect(confirmInput).toHaveValue('newpassword123');
+  });
+
+  it('hides both fields again on second toggle, still preserving values', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    await user.type(screen.getByLabelText(/nueva contraseña/i), 'newpassword123');
+    await user.type(
+      screen.getByLabelText(/confirmar contraseña/i),
+      'newpassword123',
+    );
+
+    await user.click(
+      screen.getByRole('button', { name: /mostrar las contraseñas/i }),
+    );
+    await user.click(
+      screen.getByRole('button', { name: /ocultar las contraseñas/i }),
+    );
+
+    const newPasswordInput = screen.getByLabelText(/nueva contraseña/i);
+    const confirmInput = screen.getByLabelText(/confirmar contraseña/i);
+    expect(newPasswordInput).toHaveAttribute('type', 'password');
+    expect(confirmInput).toHaveAttribute('type', 'password');
+    expect(screen.getByText('Mostrar contraseñas')).toBeInTheDocument();
+    expect(newPasswordInput).toHaveValue('newpassword123');
+    expect(confirmInput).toHaveValue('newpassword123');
+  });
+
+  it('toggle is a non-submitting button accessible by name with aria-pressed', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    const toggle = screen.getByRole('button', {
+      name: /mostrar las contraseñas/i,
+    });
+    expect(toggle).toHaveAttribute('type', 'button');
+    expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    await user.click(toggle);
+    expect(
+      screen.getByRole('button', { name: /ocultar las contraseñas/i }),
+    ).toHaveAttribute('aria-pressed', 'true');
+  });
+
+  it('keeps autocomplete=new-password on both fields after toggling visibility', async () => {
+    await renderResetPasswordForm('some-valid-token');
+
+    await user.click(
+      screen.getByRole('button', { name: /mostrar las contraseñas/i }),
+    );
+
+    expect(screen.getByLabelText(/nueva contraseña/i)).toHaveAttribute(
+      'autocomplete',
+      'new-password',
+    );
+    expect(screen.getByLabelText(/confirmar contraseña/i)).toHaveAttribute(
+      'autocomplete',
+      'new-password',
+    );
+  });
 });
 
 // ─── LogoutButton ─────────────────────────────────────────────────────────────
