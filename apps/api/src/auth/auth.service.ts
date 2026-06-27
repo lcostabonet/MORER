@@ -57,7 +57,14 @@ import type { RegisterDto } from './dto/register.dto';
 
 const BCRYPT_ROUNDS = 12;
 const RESET_TOKEN_EXPIRY_MS = 30 * 60 * 1000;
+const EMAIL_VERIFY_TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
 const JWT_EXPIRY = '7d';
+
+// Shared, centralized message for every invalid email-verification case so the
+// API never leaks which specific reason (unknown / used / expired / malformed)
+// caused the failure.
+const INVALID_VERIFICATION_MSG =
+  'El enlace de verificación no es válido o ha caducado.';
 
 // Computed once at startup to provide constant-time comparison when the
 // user does not exist or is a guest. bcrypt.compare always returns false
@@ -78,6 +85,7 @@ interface CustomerRow {
   phone: string | null;
   passwordHash: string | null;
   registeredAt: Date | null;
+  emailVerifiedAt: Date | null;
   createdAt: Date;
   updatedAt: Date;
 }
@@ -122,12 +130,19 @@ interface PrismaWithSessions {
     }>;
     findFirst(args: {
       where: { id: string; passwordHash: { not: null } };
-      select: { id: true; email: true; firstName: true; lastName: true };
+      select: {
+        id: true;
+        email: true;
+        firstName: true;
+        lastName: true;
+        emailVerifiedAt: true;
+      };
     }): Promise<{
       id: string;
       email: string;
       firstName: string | null;
       lastName: string | null;
+      emailVerifiedAt: Date | null;
     } | null>;
     create(args: {
       data: {
@@ -160,11 +175,46 @@ interface PrismaWithSessions {
     }): Promise<{ count: number }>;
     update(args: {
       where: { id: string };
-      data: { passwordHash: string };
+      data: { passwordHash?: string; emailVerifiedAt?: Date };
     }): Promise<unknown>;
   };
   authSession: AuthSessionModel;
   passwordResetToken: {
+    upsert(args: {
+      where: { customerId: string };
+      create: { customerId: string; tokenHash: string; expiresAt: Date };
+      update: { tokenHash: string; expiresAt: Date; usedAt: null };
+    }): Promise<unknown>;
+    findUnique(args: {
+      where: { tokenHash: string };
+      include: {
+        customer: {
+          select: { id: true; passwordHash: true; registeredAt: true };
+        };
+      };
+    }): Promise<{
+      id: string;
+      customerId: string;
+      tokenHash: string;
+      expiresAt: Date;
+      usedAt: Date | null;
+      customer: {
+        id: string;
+        passwordHash: string | null;
+        registeredAt: Date | null;
+      } | null;
+    } | null>;
+    updateMany(args: {
+      where: {
+        id: string;
+        tokenHash: string;
+        usedAt: null;
+        expiresAt: { gt: Date };
+      };
+      data: { usedAt: Date };
+    }): Promise<{ count: number }>;
+  };
+  emailVerificationToken: {
     upsert(args: {
       where: { customerId: string };
       create: { customerId: string; tokenHash: string; expiresAt: Date };
@@ -326,6 +376,15 @@ export class AuthService {
         this.logger.warn('welcome-email-register-error', { customerId: customer.id });
       }
 
+      // Email verification is issued outside the critical write: a Resend
+      // failure (or token-issue failure) must never revert registration or the
+      // auto-login that follows. The welcome email above is left untouched.
+      try {
+        await this.issueEmailVerificationToken(customer.id);
+      } catch (err) {
+        this.logger.warn('email-verification-register-error', { customerId: customer.id });
+      }
+
       return customer;
     } catch (err) {
       if (isPrismaUniqueConstraint(err)) {
@@ -421,7 +480,9 @@ export class AuthService {
     });
   }
 
-  async getMe(userId: string): Promise<CustomerProfile> {
+  async getMe(
+    userId: string,
+  ): Promise<CustomerProfile & { emailVerified: boolean }> {
     const customer = await this.db.customer.findFirst({
       where: {
         id: userId,
@@ -432,6 +493,7 @@ export class AuthService {
         email: true,
         firstName: true,
         lastName: true,
+        emailVerifiedAt: true,
       },
     });
 
@@ -439,7 +501,14 @@ export class AuthService {
       throw new UnauthorizedException();
     }
 
-    return customer;
+    // Expose only a boolean — never the raw emailVerifiedAt timestamp.
+    return {
+      id: customer.id,
+      email: customer.email,
+      firstName: customer.firstName,
+      lastName: customer.lastName,
+      emailVerified: customer.emailVerifiedAt !== null,
+    };
   }
 
   async forgotPassword(email: string): Promise<void> {
@@ -529,6 +598,132 @@ export class AuthService {
       await tx.authSession.updateMany({
         where: { customerId: resetRecord.customerId, revokedAt: null },
         data: { revokedAt: now },
+      });
+    });
+  }
+
+  // ─── Email verification ───────────────────────────────────────────────────────
+
+  /**
+   * Issues a fresh email-verification token for a customer and sends the email.
+   *
+   * Only acts for real, still-unverified accounts:
+   *   - passwordHash != null AND registeredAt != null (registered, not a guest)
+   *   - emailVerifiedAt == null (not already verified)
+   *   - non-synthetic email (not an anon-* / @morer-checkout.local address)
+   *
+   * Idempotent at the row level via upsert keyed by customerId: a second call
+   * REPLACES the previous token, invalidating any earlier link. Never logs or
+   * returns the raw token, the hash, or the full URL. Email-send failures are
+   * swallowed by EmailService and never surface to the caller.
+   */
+  private async issueEmailVerificationToken(customerId: string): Promise<void> {
+    let customer: CustomerRow | null;
+    try {
+      customer = await this.db.customer.findUnique({ where: { id: customerId } });
+    } catch {
+      this.logger.warn('email-verification-load-error', { customerId });
+      return;
+    }
+
+    // Silent no-op for every ineligible case — never reveal account state.
+    if (!customer) return;
+    if (!customer.passwordHash) return;
+    if (!customer.registeredAt) return;
+    if (customer.emailVerifiedAt) return;
+    if (
+      /^anon-/i.test(customer.email) ||
+      customer.email.endsWith('@morer-checkout.local')
+    ) {
+      return;
+    }
+
+    const rawToken = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + EMAIL_VERIFY_TOKEN_EXPIRY_MS);
+
+    await this.db.emailVerificationToken.upsert({
+      where: { customerId: customer.id },
+      create: { customerId: customer.id, tokenHash, expiresAt },
+      update: { tokenHash, expiresAt, usedAt: null },
+    });
+
+    const webUrl = process.env.WEB_URL ?? 'https://morer.com';
+    const verifyUrl =
+      webUrl + '/verify-email?token=' + encodeURIComponent(rawToken);
+
+    try {
+      await this.emailService.sendVerificationEmail({
+        customerId: customer.id,
+        email: customer.email,
+        firstName: customer.firstName,
+        verifyUrl,
+      });
+    } catch {
+      // Email failure must not surface to the caller.
+      this.logger.warn('email-verification-email-error', { customerId: customer.id });
+    }
+  }
+
+  /**
+   * Re-sends the verification email for an authenticated customer.
+   *
+   * The controller calls this behind JwtAuthGuard and always returns a generic
+   * success message, so callers cannot distinguish "already verified" from
+   * "email sent". Issuing a new token invalidates the previous one (upsert).
+   */
+  async resendVerification(customerId: string): Promise<void> {
+    await this.issueEmailVerificationToken(customerId);
+  }
+
+  /**
+   * Verifies a customer's email from a raw token.
+   *
+   * Mirrors resetPassword: SHA-256 the token, locate the row, validate, then
+   * atomically consume it (updateMany guarded by usedAt:null + expiresAt) and
+   * set Customer.emailVerifiedAt — both inside one transaction so a failure
+   * rolls back entirely. Every invalid case (unknown / used / replaced /
+   * expired / non-real-customer) throws the SAME 400 message. Two concurrent
+   * verifications race on the conditional updateMany: only one gets count === 1.
+   */
+  async verifyEmail(rawToken: string): Promise<void> {
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const now = new Date();
+
+    const record = await this.db.emailVerificationToken.findUnique({
+      where: { tokenHash },
+      include: {
+        customer: { select: { id: true, passwordHash: true, registeredAt: true } },
+      },
+    });
+
+    if (!record) throw new BadRequestException(INVALID_VERIFICATION_MSG);
+    if (record.usedAt) throw new BadRequestException(INVALID_VERIFICATION_MSG);
+    if (record.expiresAt <= now) throw new BadRequestException(INVALID_VERIFICATION_MSG);
+    if (!record.customer?.passwordHash) throw new BadRequestException(INVALID_VERIFICATION_MSG);
+    if (!record.customer?.registeredAt) throw new BadRequestException(INVALID_VERIFICATION_MSG);
+
+    await (this._db as {
+      $transaction(fn: (tx: PrismaWithSessions) => Promise<void>): Promise<void>;
+    }).$transaction(async (tx) => {
+      // Atomic consume — re-check conditions inside the transaction.
+      const consumed = await tx.emailVerificationToken.updateMany({
+        where: {
+          id: record.id,
+          tokenHash,
+          usedAt: null,
+          expiresAt: { gt: now },
+        },
+        data: { usedAt: now },
+      });
+
+      if (consumed.count !== 1) {
+        throw new BadRequestException(INVALID_VERIFICATION_MSG);
+      }
+
+      await tx.customer.update({
+        where: { id: record.customerId },
+        data: { emailVerifiedAt: now },
       });
     });
   }

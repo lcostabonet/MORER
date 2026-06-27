@@ -16,6 +16,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { VerifyEmailDto } from './dto/verify-email.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
 interface AuthenticatedRequest {
@@ -99,5 +100,32 @@ export class AuthController {
     }
     await this.authService.resetPassword(dto.token, dto.password);
     return { success: true };
+  }
+
+  @Post('verify-email')
+  @HttpCode(200)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 10 } })
+  @UsePipes(new ValidationPipe({ whitelist: true }))
+  async verifyEmail(@Body() dto: VerifyEmailDto) {
+    await this.authService.verifyEmail(dto.token);
+    return { success: true };
+  }
+
+  @Post('resend-verification')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 3 } })
+  async resendVerification(@Request() req: AuthenticatedRequest) {
+    try {
+      await this.authService.resendVerification(req.user.id);
+    } catch {
+      // Never expose provider / token internals — always return the generic message.
+    }
+    return {
+      success: true,
+      message:
+        'Si tu correo está pendiente de verificación, recibirás un nuevo enlace.',
+    };
   }
 }

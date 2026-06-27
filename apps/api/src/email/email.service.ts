@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OrderStatus } from '@morer/database';
 import { Resend } from 'resend';
-import { renderOrderConfirmation, renderPasswordReset, renderShippingConfirmation, renderWelcome } from '@morer/emails';
+import { renderOrderConfirmation, renderPasswordReset, renderShippingConfirmation, renderVerifyEmail, renderWelcome } from '@morer/emails';
 import { PrismaService } from '../database/prisma.service';
 
 const CURRENCY = 'EUR';
@@ -462,6 +462,55 @@ export class EmailService {
       const code =
         err instanceof Error ? err.name : 'UNKNOWN';
       console.warn(`[email] Failed to send password-reset email`, {
+        customerId: params.customerId,
+        code,
+      });
+    }
+  }
+
+  /**
+   * Sends an email-verification email to the customer.
+   *
+   * Does NOT use an atomic claim — each register/resend intentionally replaces
+   * the previous token (upsert in AuthService), so there is no need to
+   * deduplicate sends. Failures are logged but never rethrown so the caller
+   * always gets a consistent response regardless of email delivery.
+   *
+   * Never logs PII: email, firstName, verifyUrl, or the raw token are excluded
+   * from all log lines.
+   */
+  async sendVerificationEmail(params: {
+    customerId: string;
+    email: string;
+    firstName: string | null;
+    verifyUrl: string;
+  }): Promise<void> {
+    try {
+      const html = await renderVerifyEmail({
+        firstName: params.firstName,
+        verifyUrl: params.verifyUrl,
+      });
+
+      const { error } = await this.resend.emails.send({
+        from: this.fromAddress,
+        to: params.email,
+        subject: 'Verifica tu correo de MORER',
+        html,
+      });
+
+      if (error) {
+        const code = (error as unknown as Record<string, unknown>)['name'] ?? 'UNKNOWN';
+        console.warn(`[email] Provider error sending verification email`, {
+          customerId: params.customerId,
+          code,
+        });
+        return;
+      }
+
+      console.log(`[email] Verification email sent — customer: ${params.customerId}`);
+    } catch (err) {
+      const code = err instanceof Error ? err.name : 'UNKNOWN';
+      console.warn(`[email] Failed to send verification email`, {
         customerId: params.customerId,
         code,
       });

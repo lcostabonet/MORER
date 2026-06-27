@@ -4,6 +4,7 @@ import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
 import { LogoutButton } from './_components/LogoutButton';
+import { EmailVerificationStatus } from './_components/EmailVerificationStatus';
 import { LogoutAllButton } from '@/components/logout-all-button';
 
 export const metadata: Metadata = {
@@ -51,7 +52,10 @@ export default async function AccountPage() {
             <dt className="text-xs font-medium tracking-[0.1em] uppercase text-stone-500 sm:w-32 flex-shrink-0 mb-1 sm:mb-0">
               Email
             </dt>
-            <dd className="text-sm text-stone-900">{user.email}</dd>
+            <dd className="text-sm text-stone-900 flex-1">
+              <span className="block mb-3">{user.email}</span>
+              <EmailVerificationStatus verified={user.emailVerified} />
+            </dd>
           </div>
           <div className="flex flex-col sm:flex-row sm:gap-8">
             <dt className="text-xs font-medium tracking-[0.1em] uppercase text-stone-500 sm:w-32 flex-shrink-0 mb-1 sm:mb-0">

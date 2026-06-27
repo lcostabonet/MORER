@@ -46,6 +46,11 @@ type PrismaMockWithReset = PrismaMock & {
     upsert: ReturnType<typeof vi.fn>;
     updateMany: ReturnType<typeof vi.fn>;
   };
+  emailVerificationToken: {
+    findUnique: ReturnType<typeof vi.fn>;
+    upsert: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
+  };
 };
 
 function createPrismaMockWithReset(): PrismaMockWithReset {
@@ -56,9 +61,14 @@ function createPrismaMockWithReset(): PrismaMockWithReset {
     upsert: vi.fn().mockResolvedValue({}),
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
   };
-  // $transaction for resetPassword: pass the extended mock as the tx arg so
-  // passwordResetToken / customer / authSession delegates are available inside
-  // the transaction callback.
+  extended.emailVerificationToken = {
+    findUnique: vi.fn().mockResolvedValue(null),
+    upsert: vi.fn().mockResolvedValue({}),
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+  };
+  // $transaction for resetPassword / verifyEmail: pass the extended mock as the
+  // tx arg so passwordResetToken / emailVerificationToken / customer /
+  // authSession delegates are available inside the transaction callback.
   extended.$transaction = vi.fn().mockImplementation(
     async (cb: (tx: unknown) => unknown) => cb(extended),
   );
@@ -69,12 +79,14 @@ function createPrismaMockWithReset(): PrismaMockWithReset {
 type EmailServiceMock = {
   sendWelcomeEmailIfNeeded: ReturnType<typeof vi.fn>;
   sendPasswordResetEmail: ReturnType<typeof vi.fn>;
+  sendVerificationEmail: ReturnType<typeof vi.fn>;
 };
 
 function createEmailServiceMock(): EmailServiceMock {
   return {
     sendWelcomeEmailIfNeeded: vi.fn().mockResolvedValue(undefined),
     sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
+    sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -97,6 +109,7 @@ function registeredCustomerFixture(overrides: Record<string, unknown> = {}) {
     lastName: 'Costa',
     passwordHash: PASSWORD_HASH,
     registeredAt: new Date('2026-01-01T00:00:00Z'),
+    emailVerifiedAt: null,
     ...overrides,
   };
 }
@@ -151,9 +164,15 @@ describe('AuthService', () => {
     prismaMock.passwordResetToken.upsert.mockReset().mockResolvedValue({});
     prismaMock.passwordResetToken.updateMany.mockReset().mockResolvedValue({ count: 1 });
 
+    // Reset emailVerificationToken mock fns
+    prismaMock.emailVerificationToken.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.emailVerificationToken.upsert.mockReset().mockResolvedValue({});
+    prismaMock.emailVerificationToken.updateMany.mockReset().mockResolvedValue({ count: 1 });
+
     // Reset emailService mock
     emailServiceMock.sendWelcomeEmailIfNeeded.mockReset().mockResolvedValue(undefined);
     emailServiceMock.sendPasswordResetEmail.mockReset().mockResolvedValue(undefined);
+    emailServiceMock.sendVerificationEmail.mockReset().mockResolvedValue(undefined);
 
     // Default bcrypt behaviour
     vi.mocked(bcrypt.hash).mockResolvedValue(PASSWORD_HASH as never);
@@ -464,18 +483,40 @@ describe('AuthService', () => {
   // ─── getMe ──────────────────────────────────────────────────────────────────
 
   describe('getMe', () => {
-    it('returns customer profile when userId matches a registered customer', async () => {
-      const profile = profileFixture();
-      prismaMock.customer.findFirst.mockResolvedValue(profile);
+    it('returns customer profile with emailVerified=false when unverified', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({
+        ...profileFixture(),
+        emailVerifiedAt: null,
+      });
 
       const result = await service.getMe(CUSTOMER_ID);
 
-      expect(result).toEqual(profile);
+      expect(result).toEqual({ ...profileFixture(), emailVerified: false });
       expect(result).not.toHaveProperty('passwordHash');
+      // The raw timestamp must never be exposed — only the boolean.
+      expect(result).not.toHaveProperty('emailVerifiedAt');
       expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({
         where: { id: CUSTOMER_ID, passwordHash: { not: null } },
-        select: { id: true, email: true, firstName: true, lastName: true },
+        select: {
+          id: true,
+          email: true,
+          firstName: true,
+          lastName: true,
+          emailVerifiedAt: true,
+        },
       });
+    });
+
+    it('returns emailVerified=true when emailVerifiedAt is set', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({
+        ...profileFixture(),
+        emailVerifiedAt: new Date('2026-02-01T00:00:00Z'),
+      });
+
+      const result = await service.getMe(CUSTOMER_ID);
+
+      expect(result.emailVerified).toBe(true);
+      expect(result).not.toHaveProperty('emailVerifiedAt');
     });
 
     it('throws UnauthorizedException when customer not found or has no passwordHash', async () => {
@@ -856,6 +897,257 @@ describe('AuthService', () => {
 
       // authSession.updateMany should not have been reached after customer.update threw
       expect(prismaMock.authSession.updateMany).not.toHaveBeenCalled();
+    });
+  });
+
+  // ─── email verification: issued on register ───────────────────────────────────
+
+  describe('register — email verification', () => {
+    it('issues a verification token and sends the email for a real new account', async () => {
+      // 1st findUnique = duplicate check (none); 2nd = issue-helper re-fetch.
+      prismaMock.customer.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(registeredCustomerFixture());
+      prismaMock.customer.create.mockResolvedValue(profileFixture());
+
+      await service.register({ email: EMAIL, password: PASSWORD, firstName: 'Joan' });
+
+      expect(prismaMock.emailVerificationToken.upsert).toHaveBeenCalledOnce();
+      expect(emailServiceMock.sendVerificationEmail).toHaveBeenCalledOnce();
+    });
+
+    it('persists only the SHA-256 hash, never the raw token', async () => {
+      prismaMock.customer.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(registeredCustomerFixture());
+      prismaMock.customer.create.mockResolvedValue(profileFixture());
+
+      await service.register({ email: EMAIL, password: PASSWORD, firstName: 'Joan' });
+
+      const call = prismaMock.emailVerificationToken.upsert.mock.calls[0][0] as {
+        create: { tokenHash: string };
+        update: { tokenHash: string; usedAt: null };
+      };
+      expect(call.create.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(call.update.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(call.create.tokenHash).toBe(call.update.tokenHash);
+      expect(call.update.usedAt).toBeNull();
+    });
+
+    it('does not issue a verification token for a guest re-fetch (passwordHash null)', async () => {
+      // Eligibility is re-checked inside the issue helper: a non-real account is skipped.
+      prismaMock.customer.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(registeredCustomerFixture({ passwordHash: null }));
+      prismaMock.customer.create.mockResolvedValue(profileFixture());
+
+      await service.register({ email: EMAIL, password: PASSWORD, firstName: 'Joan' });
+
+      expect(prismaMock.emailVerificationToken.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendVerificationEmail).not.toHaveBeenCalled();
+    });
+
+    it('registration succeeds even if the verification email send rejects', async () => {
+      prismaMock.customer.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(registeredCustomerFixture());
+      prismaMock.customer.create.mockResolvedValue(profileFixture());
+      emailServiceMock.sendVerificationEmail.mockRejectedValue(new Error('Resend down'));
+
+      await expect(
+        service.register({ email: EMAIL, password: PASSWORD, firstName: 'Joan' }),
+      ).resolves.toEqual(profileFixture());
+    });
+
+    it('registration succeeds even if the verification token upsert rejects', async () => {
+      prismaMock.customer.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(registeredCustomerFixture());
+      prismaMock.customer.create.mockResolvedValue(profileFixture());
+      prismaMock.emailVerificationToken.upsert.mockRejectedValue(new Error('DB down'));
+
+      await expect(
+        service.register({ email: EMAIL, password: PASSWORD, firstName: 'Joan' }),
+      ).resolves.toEqual(profileFixture());
+    });
+  });
+
+  // ─── resendVerification ───────────────────────────────────────────────────────
+
+  describe('resendVerification', () => {
+    it('issues a new token and sends the email for a pending account', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+
+      await service.resendVerification(CUSTOMER_ID);
+
+      expect(prismaMock.emailVerificationToken.upsert).toHaveBeenCalledOnce();
+      expect(emailServiceMock.sendVerificationEmail).toHaveBeenCalledOnce();
+    });
+
+    it('does not send when the account is already verified', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ emailVerifiedAt: new Date('2026-02-01T00:00:00Z') }),
+      );
+
+      await service.resendVerification(CUSTOMER_ID);
+
+      expect(prismaMock.emailVerificationToken.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendVerificationEmail).not.toHaveBeenCalled();
+    });
+
+    it('does not send for a guest account (passwordHash null)', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ passwordHash: null }),
+      );
+
+      await service.resendVerification(CUSTOMER_ID);
+
+      expect(prismaMock.emailVerificationToken.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendVerificationEmail).not.toHaveBeenCalled();
+    });
+
+    it('does not send for a synthetic anon-* email', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ email: 'anon-abc@morer-checkout.local' }),
+      );
+
+      await service.resendVerification(CUSTOMER_ID);
+
+      expect(prismaMock.emailVerificationToken.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendVerificationEmail).not.toHaveBeenCalled();
+    });
+
+    it('does not throw when sendVerificationEmail rejects', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+      emailServiceMock.sendVerificationEmail.mockRejectedValue(new Error('Resend down'));
+
+      await expect(service.resendVerification(CUSTOMER_ID)).resolves.toBeUndefined();
+    });
+
+    it('second resend replaces the token (update arm sets usedAt: null)', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(registeredCustomerFixture());
+
+      await service.resendVerification(CUSTOMER_ID);
+      await service.resendVerification(CUSTOMER_ID);
+
+      expect(prismaMock.emailVerificationToken.upsert).toHaveBeenCalledTimes(2);
+      for (const [callArgs] of prismaMock.emailVerificationToken.upsert.mock.calls) {
+        const args = callArgs as { update: { usedAt: null } };
+        expect(args.update.usedAt).toBeNull();
+      }
+    });
+  });
+
+  // ─── verifyEmail ──────────────────────────────────────────────────────────────
+
+  describe('verifyEmail', () => {
+    const RAW_TOKEN = 'valid-raw-token-for-verify';
+    const INVALID_MSG = 'El enlace de verificación no es válido o ha caducado.';
+    const EVT_RECORD_ID = 'evt-id-001';
+
+    function validVerifyRecord(overrides: Record<string, unknown> = {}) {
+      return {
+        id: EVT_RECORD_ID,
+        customerId: CUSTOMER_ID,
+        tokenHash: 'will-be-computed',
+        expiresAt: new Date(Date.now() + 24 * 60 * 60 * 1000), // 24 h from now
+        usedAt: null,
+        customer: {
+          id: CUSTOMER_ID,
+          passwordHash: PASSWORD_HASH,
+          registeredAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        ...overrides,
+      };
+    }
+
+    it('sets emailVerifiedAt on success', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(validVerifyRecord());
+      prismaMock.emailVerificationToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+
+      await service.verifyEmail(RAW_TOKEN);
+
+      expect(prismaMock.customer.update).toHaveBeenCalledOnce();
+      const updateCall = prismaMock.customer.update.mock.calls[0][0] as {
+        where: { id: string };
+        data: { emailVerifiedAt: Date };
+      };
+      expect(updateCall.where.id).toBe(CUSTOMER_ID);
+      expect(updateCall.data.emailVerifiedAt).toBeInstanceOf(Date);
+    });
+
+    it('marks the token as used (updateMany usedAt) on success', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(validVerifyRecord());
+      prismaMock.emailVerificationToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+
+      await service.verifyEmail(RAW_TOKEN);
+
+      expect(prismaMock.emailVerificationToken.updateMany).toHaveBeenCalledOnce();
+      const call = prismaMock.emailVerificationToken.updateMany.mock.calls[0][0] as {
+        data: { usedAt: Date };
+      };
+      expect(call.data.usedAt).toBeInstanceOf(Date);
+    });
+
+    it('throws BadRequestException with the generic message for an unknown token', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(null);
+
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow(BadRequestException);
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow(INVALID_MSG);
+    });
+
+    it('throws BadRequestException when the token is already used', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(
+        validVerifyRecord({ usedAt: new Date('2026-01-01T00:00:00Z') }),
+      );
+
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when the token is expired', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(
+        validVerifyRecord({ expiresAt: new Date(Date.now() - 1000) }),
+      );
+
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow(BadRequestException);
+    });
+
+    it('throws BadRequestException when the customer is not a real account', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(
+        validVerifyRecord({
+          customer: { id: CUSTOMER_ID, passwordHash: null, registeredAt: new Date() },
+        }),
+      );
+
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow(BadRequestException);
+    });
+
+    it('does not set emailVerifiedAt when the token is invalid', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(null);
+
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow();
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('concurrent verify: second updateMany count 0 → BadRequestException', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(validVerifyRecord());
+      prismaMock.emailVerificationToken.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 });
+      prismaMock.customer.update.mockResolvedValue({});
+
+      await service.verifyEmail(RAW_TOKEN); // first wins
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow(BadRequestException);
+    });
+
+    it('transaction rolls back if customer.update throws — error propagates', async () => {
+      prismaMock.emailVerificationToken.findUnique.mockResolvedValue(validVerifyRecord());
+      prismaMock.emailVerificationToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockRejectedValue(new Error('DB error'));
+
+      await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow('DB error');
     });
   });
 });

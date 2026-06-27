@@ -636,6 +636,7 @@ describe('GET /api/auth/me', () => {
         email: 'user@example.com',
         firstName: 'Joan',
         lastName: 'Costa',
+        emailVerified: true,
         passwordHash: '$2b$12$shouldnotbeleaked',
         accessToken: 'should-not-leak',
       }),
@@ -656,6 +657,8 @@ describe('GET /api/auth/me', () => {
     expect(body.email).toBe('user@example.com');
     expect(body.firstName).toBe('Joan');
     expect(body.lastName).toBe('Costa');
+    // emailVerified boolean is forwarded
+    expect(body.emailVerified).toBe(true);
     // Sensitive fields must NOT be present
     expect(body).not.toHaveProperty('accessToken');
     expect(body).not.toHaveProperty('passwordHash');
@@ -949,5 +952,171 @@ describe('Security: no localStorage or sessionStorage used in auth-related sourc
     expect(typeof COOKIE_NAME).toBe('string');
     expect(COOKIE_NAME).not.toContain('localStorage');
     expect(COOKIE_NAME).not.toContain('sessionStorage');
+  });
+});
+
+// ─── Verify-email route ───────────────────────────────────────────────────────
+
+describe('POST /api/auth/verify-email', () => {
+  let handler: (req: NextRequest) => Promise<Response>;
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const mod = await import('@/app/api/auth/verify-email/route');
+    handler = mod.POST;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('CSRF: cross-site request returns 403 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/verify-email', { token: 'x' }, {}, {
+      'sec-fetch-site': 'cross-site',
+    });
+    const res = await handler(req);
+    expect(res.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('success: returns 200 with success:true', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(200, { success: true }));
+
+    const req = makeRequest('POST', '/api/auth/verify-email', { token: 'good-token' });
+    const res = await handler(req);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+  });
+
+  it('invalid token (400): forwards the message and never the HTTP error category', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(400, {
+        message: 'El enlace de verificación no es válido o ha caducado.',
+        error: 'Bad Request',
+        statusCode: 400,
+      }),
+    );
+
+    const req = makeRequest('POST', '/api/auth/verify-email', { token: 'used-token' });
+    const res = await handler(req);
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe('El enlace de verificación no es válido o ha caducado.');
+    // The NestJS HTTP category ("Bad Request") must never reach the client.
+    expect(body.error).not.toBe('Bad Request');
+  });
+
+  it('missing token: returns 400 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/verify-email', { notToken: 'x' });
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('API network error: returns 503', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const req = makeRequest('POST', '/api/auth/verify-email', { token: 'tok' });
+    const res = await handler(req);
+    expect(res.status).toBe(503);
+  });
+});
+
+// ─── Resend-verification route ────────────────────────────────────────────────
+
+describe('POST /api/auth/resend-verification', () => {
+  let handler: (req: NextRequest) => Promise<Response>;
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const mod = await import('@/app/api/auth/resend-verification/route');
+    handler = mod.POST;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('CSRF: cross-site request returns 403 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/resend-verification', undefined, {
+      [COOKIE_NAME]: 'tok',
+    }, { 'sec-fetch-site': 'cross-site' });
+    const res = await handler(req);
+    expect(res.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('missing cookie: returns 401 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/resend-verification');
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('success: forwards the Bearer token and returns the generic success message', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, { success: true, message: 'whatever the API says' }),
+    );
+
+    const req = makeRequest('POST', '/api/auth/resend-verification', undefined, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(typeof body.message).toBe('string');
+    expect((body.message as string).length).toBeGreaterThan(0);
+
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toContain('/auth/resend-verification');
+    expect((options.headers as Record<string, string>)['Authorization']).toBe(
+      'Bearer auth-token-123',
+    );
+  });
+
+  it('backend 401: returns 401', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(401, { message: 'Unauthorized' }));
+
+    const req = makeRequest('POST', '/api/auth/resend-verification', undefined, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+  });
+
+  it('backend 429: returns 429 with a controlled retry message (no internals)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(429, { message: 'Too Many Requests' }));
+
+    const req = makeRequest('POST', '/api/auth/resend-verification', undefined, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).not.toBe('Too Many Requests');
+  });
+
+  it('API network error: returns 200 with the generic success message (non-enumerating)', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const req = makeRequest('POST', '/api/auth/resend-verification', undefined, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
   });
 });

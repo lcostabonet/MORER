@@ -129,13 +129,15 @@ model Customer {
   registeredAt          DateTime?
   welcomeEmailSentAt    DateTime?
   welcomeEmailSendingAt DateTime?
+  emailVerifiedAt       DateTime?
   createdAt             DateTime  @default(now())
   updatedAt             DateTime  @updatedAt
 
   carts    Cart[]
   orders   Order[]
   sessions AuthSession[]
-  passwordResetToken PasswordResetToken?
+  passwordResetToken     PasswordResetToken?
+  emailVerificationToken EmailVerificationToken?
 
   @@map("customers")
 }
@@ -310,4 +312,19 @@ model PasswordResetToken {
 
   @@index([expiresAt])
   @@map("password_reset_tokens")
+}
+
+model EmailVerificationToken {
+  id         String    @id @default(cuid())
+  customerId String    @unique
+  tokenHash  String    @unique
+  expiresAt  DateTime
+  usedAt     DateTime?
+  createdAt  DateTime  @default(now())
+  updatedAt  DateTime  @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([expiresAt])
+  @@map("email_verification_tokens")
 }

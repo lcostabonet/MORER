@@ -58,6 +58,7 @@ export interface AuthUser {
   email: string;
   firstName: string;
   lastName: string;
+  emailVerified: boolean;
 }
 
 export async function getCurrentUser(
@@ -73,8 +74,14 @@ export async function getCurrentUser(
     });
     if (res.status === 401 || res.status === 403) return null;
     if (!res.ok) return null;
-    const data = (await res.json()) as AuthUser;
-    return { id: data.id, email: data.email, firstName: data.firstName, lastName: data.lastName };
+    const data = (await res.json()) as Partial<AuthUser>;
+    return {
+      id: data.id ?? '',
+      email: data.email ?? '',
+      firstName: data.firstName ?? '',
+      lastName: data.lastName ?? '',
+      emailVerified: data.emailVerified === true,
+    };
   } catch {
     return null;
   }

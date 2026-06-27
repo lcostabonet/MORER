@@ -989,3 +989,225 @@ describe('AccountPage', () => {
     ).toBeInTheDocument();
   });
 });
+
+// ─── VerifyEmailClient ────────────────────────────────────────────────────────
+
+describe('VerifyEmailClient', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+    mockReplace.mockReset();
+    mockPush.mockReset();
+    mockRefresh.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderVerifyEmailClient(token: string) {
+    const { VerifyEmailClient } = await import(
+      '@/app/verify-email/_components/VerifyEmailClient'
+    );
+    return render(React.createElement(VerifyEmailClient, { token }));
+  }
+
+  it('POSTs the token on mount, shows success, and strips the token from the URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderVerifyEmailClient('valid-token');
+
+    expect(await screen.findByText('Correo verificado correctamente.')).toBeInTheDocument();
+
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe('/api/auth/verify-email');
+    expect(options.method).toBe('POST');
+    expect(String(options.body)).toContain('valid-token');
+
+    // Token removed from the URL after processing
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/verify-email'));
+  });
+
+  it('shows the generic invalid message on a 400 and never leaks internal error text', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: 'El enlace de verificación no es válido o ha caducado.' }),
+        { status: 400 },
+      ),
+    );
+
+    await renderVerifyEmailClient('used-token');
+
+    expect(
+      await screen.findByText(/enlace de verificación no es válido/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/bad request/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/unauthorized/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/verify-email'));
+  });
+
+  it('shows the invalid message and does not call fetch when no token is present', async () => {
+    await renderVerifyEmailClient('');
+
+    expect(
+      await screen.findByText(/enlace de verificación no es válido/i),
+    ).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('shows the invalid message (not a service error) when fetch throws', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('Network error'));
+
+    await renderVerifyEmailClient('some-token');
+
+    expect(
+      await screen.findByText(/enlace de verificación no es válido/i),
+    ).toBeInTheDocument();
+  });
+
+  it('POSTs the token only once', async () => {
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderVerifyEmailClient('once-token');
+
+    expect(await screen.findByText('Correo verificado correctamente.')).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the success message after the token is stripped from the URL (re-render with token="")', async () => {
+    // Regression: router.replace('/verify-email') re-renders the server page with
+    // empty searchParams, so the client re-renders with token=''. The result must
+    // NOT flip back to the invalid-link message.
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    const { VerifyEmailClient } = await import(
+      '@/app/verify-email/_components/VerifyEmailClient'
+    );
+    const view = render(React.createElement(VerifyEmailClient, { token: 'valid-token' }));
+
+    expect(await screen.findByText('Correo verificado correctamente.')).toBeInTheDocument();
+
+    // Simulate the post-replace re-render with the token removed from the URL.
+    view.rerender(React.createElement(VerifyEmailClient, { token: '' }));
+
+    expect(screen.getByText('Correo verificado correctamente.')).toBeInTheDocument();
+    expect(
+      screen.queryByText(/enlace de verificación no es válido/i),
+    ).not.toBeInTheDocument();
+    // No second POST is triggered by the re-render.
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('keeps the invalid message after the token is stripped from the URL (re-render with token="")', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: 'El enlace de verificación no es válido o ha caducado.' }),
+        { status: 400 },
+      ),
+    );
+
+    const { VerifyEmailClient } = await import(
+      '@/app/verify-email/_components/VerifyEmailClient'
+    );
+    const view = render(React.createElement(VerifyEmailClient, { token: 'bad-token' }));
+
+    expect(
+      await screen.findByText(/enlace de verificación no es válido/i),
+    ).toBeInTheDocument();
+
+    view.rerender(React.createElement(VerifyEmailClient, { token: '' }));
+
+    expect(
+      screen.getByText(/enlace de verificación no es válido/i),
+    ).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── EmailVerificationStatus ──────────────────────────────────────────────────
+
+describe('EmailVerificationStatus', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderStatus(verified: boolean) {
+    const { EmailVerificationStatus } = await import(
+      '@/app/account/_components/EmailVerificationStatus'
+    );
+    return render(React.createElement(EmailVerificationStatus, { verified }));
+  }
+
+  it('shows "Correo verificado" and no resend button when verified', async () => {
+    await renderStatus(true);
+
+    expect(screen.getByText('Correo verificado')).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /reenviar correo de verificación/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows the pending banner and a resend button when not verified', async () => {
+    await renderStatus(false);
+
+    expect(screen.getByText(/pendiente de verificación/i)).toBeInTheDocument();
+    const button = screen.getByRole('button', {
+      name: /reenviar correo de verificación/i,
+    });
+    expect(button).toHaveAttribute('type', 'button');
+  });
+
+  it('resend shows the success message returned by the BFF', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          success: true,
+          message: 'Si tu correo está pendiente de verificación, recibirás un nuevo enlace.',
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await renderStatus(false);
+    await user.click(
+      screen.getByRole('button', { name: /reenviar correo de verificación/i }),
+    );
+
+    expect(
+      await screen.findByText(/recibirás un nuevo enlace/i),
+    ).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledWith('/api/auth/resend-verification', {
+      method: 'POST',
+    });
+  });
+
+  it('resend shows an accessible error message on failure', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'nope' }), { status: 500 }),
+    );
+
+    await renderStatus(false);
+    await user.click(
+      screen.getByRole('button', { name: /reenviar correo de verificación/i }),
+    );
+
+    expect(await screen.findByText(/no se ha podido enviar el correo/i)).toBeInTheDocument();
+  });
+});

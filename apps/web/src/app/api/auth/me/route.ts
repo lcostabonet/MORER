@@ -46,6 +46,7 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       email: user.email,
       firstName: user.firstName,
       lastName: user.lastName,
+      emailVerified: user.emailVerified === true,
     },
     { status: 200 },
   );
