@@ -1211,3 +1211,259 @@ describe('EmailVerificationStatus', () => {
     expect(await screen.findByText(/no se ha podido enviar el correo/i)).toBeInTheDocument();
   });
 });
+
+// ─── ProfileCard ──────────────────────────────────────────────────────────────
+
+describe('ProfileCard', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  const BASE: {
+    firstName: string;
+    lastName: string;
+    email: string;
+    phone: string | null;
+    emailVerified: boolean;
+  } = {
+    firstName: 'Joan',
+    lastName: 'Costa',
+    email: 'joan@example.com',
+    phone: '+34612345678',
+    emailVerified: true,
+  };
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+    mockReplace.mockReset();
+    mockPush.mockReset();
+    mockRefresh.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderProfileCard(overrides: Partial<typeof BASE> = {}) {
+    const { ProfileCard } = await import('@/app/account/_components/ProfileCard');
+    return render(React.createElement(ProfileCard, { ...BASE, ...overrides }));
+  }
+
+  async function enterEditMode() {
+    await user.click(screen.getByRole('button', { name: /editar perfil/i }));
+  }
+
+  it('starts in read mode showing values and an "Editar perfil" button', async () => {
+    await renderProfileCard();
+
+    expect(screen.getByText('Joan')).toBeInTheDocument();
+    expect(screen.getByText('Costa')).toBeInTheDocument();
+    expect(screen.getByText('joan@example.com')).toBeInTheDocument();
+    expect(screen.getByText('+34612345678')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /editar perfil/i })).toBeInTheDocument();
+    expect(
+      screen.queryByRole('button', { name: /guardar cambios/i }),
+    ).not.toBeInTheDocument();
+  });
+
+  it('shows "No indicado" when phone is null', async () => {
+    await renderProfileCard({ phone: null });
+    expect(screen.getByText('No indicado')).toBeInTheDocument();
+  });
+
+  it('"Editar perfil" activates the fields; email is not editable', async () => {
+    await renderProfileCard();
+    await enterEditMode();
+
+    expect(screen.getByLabelText(/nombre/i)).toBeEnabled();
+    expect(screen.getByLabelText(/apellidos/i)).toBeEnabled();
+    const email = screen.getByLabelText(/email/i);
+    expect(email).toBeDisabled();
+    expect(email).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: /guardar cambios/i })).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /cancelar/i })).toBeInTheDocument();
+  });
+
+  it('"Cancelar" restores values, exits edit mode, and sends no request', async () => {
+    await renderProfileCard();
+    await enterEditMode();
+
+    const firstName = screen.getByLabelText(/nombre/i);
+    await user.clear(firstName);
+    await user.type(firstName, 'Cambiado');
+
+    await user.click(screen.getByRole('button', { name: /cancelar/i }));
+
+    // Back to read mode with the original persisted value
+    expect(screen.getByText('Joan')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: /guardar cambios/i })).not.toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('validates required firstName without calling the API', async () => {
+    await renderProfileCard();
+    await enterEditMode();
+
+    await user.clear(screen.getByLabelText(/nombre/i));
+    await user.click(screen.getByRole('button', { name: /guardar cambios/i }));
+
+    expect(await screen.findByText('El nombre es obligatorio.')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('validates required lastName without calling the API', async () => {
+    await renderProfileCard();
+    await enterEditMode();
+
+    await user.clear(screen.getByLabelText(/apellidos/i));
+    await user.click(screen.getByRole('button', { name: /guardar cambios/i }));
+
+    expect(await screen.findByText('Los apellidos son obligatorios.')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('validates phone format client-side without calling the API', async () => {
+    await renderProfileCard({ phone: null });
+    await enterEditMode();
+
+    await user.type(screen.getByLabelText(/teléfono/i), '123456');
+    await user.click(screen.getByRole('button', { name: /guardar cambios/i }));
+
+    expect(
+      await screen.findByText(/teléfono internacional válido/i),
+    ).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('saves successfully: shows the exact message, updates the view, refreshes', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: 'u1',
+          email: 'joan@example.com',
+          firstName: 'Anna',
+          lastName: 'Puig',
+          phone: '+34600111222',
+          emailVerified: true,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await renderProfileCard();
+    await enterEditMode();
+
+    const firstName = screen.getByLabelText(/nombre/i);
+    await user.clear(firstName);
+    await user.type(firstName, 'Anna');
+    const lastName = screen.getByLabelText(/apellidos/i);
+    await user.clear(lastName);
+    await user.type(lastName, 'Puig');
+
+    await user.click(screen.getByRole('button', { name: /guardar cambios/i }));
+
+    expect(await screen.findByText('Perfil actualizado correctamente.')).toBeInTheDocument();
+    // Read mode now shows the server's canonical values
+    expect(screen.getByText('Anna')).toBeInTheDocument();
+    expect(screen.getByText('Puig')).toBeInTheDocument();
+    expect(screen.getByText('+34600111222')).toBeInTheDocument();
+    expect(mockRefresh).toHaveBeenCalled();
+
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toBe('/api/auth/me');
+    expect(options.method).toBe('PATCH');
+  });
+
+  it('keeps typed values and shows an error when the server rejects', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({ error: 'No se ha podido actualizar el perfil. Inténtalo de nuevo.' }),
+        { status: 500 },
+      ),
+    );
+
+    await renderProfileCard();
+    await enterEditMode();
+
+    const firstName = screen.getByLabelText(/nombre/i);
+    await user.clear(firstName);
+    await user.type(firstName, 'Escrito');
+
+    await user.click(screen.getByRole('button', { name: /guardar cambios/i }));
+
+    expect(await screen.findByText(/no se ha podido actualizar el perfil/i)).toBeInTheDocument();
+    // Still in edit mode and the typed value is preserved
+    expect(screen.getByLabelText(/nombre/i)).toHaveValue('Escrito');
+    expect(mockRefresh).not.toHaveBeenCalled();
+  });
+
+  it('blocks a double submit while a save is in flight', async () => {
+    let resolveFetch: (value: Response) => void = () => {};
+    vi.mocked(fetch).mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      }) as unknown as ReturnType<typeof fetch>,
+    );
+
+    await renderProfileCard();
+    await enterEditMode();
+
+    const saveButton = screen.getByRole('button', { name: /guardar cambios/i });
+    await user.click(saveButton);
+
+    // The button is now disabled (loading) — a second click cannot fire a 2nd request
+    const loadingButton = screen.getByRole('button', { name: /guardando/i });
+    expect(loadingButton).toBeDisabled();
+    await user.click(loadingButton);
+
+    resolveFetch(
+      new Response(
+        JSON.stringify({
+          id: 'u1',
+          email: 'joan@example.com',
+          firstName: 'Joan',
+          lastName: 'Costa',
+          phone: '+34612345678',
+          emailVerified: true,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await screen.findByText('Perfil actualizado correctamente.');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('sends null for an empty phone on submit', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          id: 'u1',
+          email: 'joan@example.com',
+          firstName: 'Joan',
+          lastName: 'Costa',
+          phone: null,
+          emailVerified: true,
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await renderProfileCard({ phone: '+34612345678' });
+    await enterEditMode();
+
+    await user.clear(screen.getByLabelText(/teléfono/i));
+    await user.click(screen.getByRole('button', { name: /guardar cambios/i }));
+
+    await screen.findByText('Perfil actualizado correctamente.');
+    const [, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    const body = JSON.parse(String(options.body)) as { phone: unknown };
+    expect(body.phone).toBeNull();
+  });
+});

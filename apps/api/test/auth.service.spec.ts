@@ -486,12 +486,13 @@ describe('AuthService', () => {
     it('returns customer profile with emailVerified=false when unverified', async () => {
       prismaMock.customer.findFirst.mockResolvedValue({
         ...profileFixture(),
+        phone: null,
         emailVerifiedAt: null,
       });
 
       const result = await service.getMe(CUSTOMER_ID);
 
-      expect(result).toEqual({ ...profileFixture(), emailVerified: false });
+      expect(result).toEqual({ ...profileFixture(), phone: null, emailVerified: false });
       expect(result).not.toHaveProperty('passwordHash');
       // The raw timestamp must never be exposed — only the boolean.
       expect(result).not.toHaveProperty('emailVerifiedAt');
@@ -502,6 +503,7 @@ describe('AuthService', () => {
           email: true,
           firstName: true,
           lastName: true,
+          phone: true,
           emailVerifiedAt: true,
         },
       });
@@ -525,6 +527,218 @@ describe('AuthService', () => {
       await expect(service.getMe(CUSTOMER_ID)).rejects.toThrow(
         UnauthorizedException,
       );
+    });
+  });
+
+  // ─── updateProfile ────────────────────────────────────────────────────────────
+
+  describe('updateProfile', () => {
+    // The row returned by getMe() (called at the end of updateProfile).
+    function profileRow(overrides: Record<string, unknown> = {}) {
+      return {
+        id: CUSTOMER_ID,
+        email: EMAIL_TRIMMED,
+        firstName: 'Joan',
+        lastName: 'Costa',
+        phone: null,
+        emailVerifiedAt: null,
+        ...overrides,
+      };
+    }
+
+    // Returns the `data` object passed to customer.update in the last call.
+    function lastUpdateData() {
+      const calls = prismaMock.customer.update.mock.calls;
+      return (calls[calls.length - 1][0] as { data: Record<string, unknown> }).data;
+    }
+    function lastUpdateWhere() {
+      const calls = prismaMock.customer.update.mock.calls;
+      return (calls[calls.length - 1][0] as { where: Record<string, unknown> }).where;
+    }
+
+    beforeEach(() => {
+      prismaMock.customer.update.mockResolvedValue({});
+      prismaMock.customer.findFirst.mockResolvedValue(profileRow());
+    });
+
+    it('updates firstName and lastName for the authenticated user', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(
+        profileRow({ firstName: 'Anna', lastName: 'Puig' }),
+      );
+
+      const result = await service.updateProfile(CUSTOMER_ID, {
+        firstName: 'Anna',
+        lastName: 'Puig',
+      });
+
+      expect(prismaMock.customer.update).toHaveBeenCalledOnce();
+      expect(lastUpdateWhere().id).toBe(CUSTOMER_ID);
+      expect(lastUpdateData().firstName).toBe('Anna');
+      expect(lastUpdateData().lastName).toBe('Puig');
+      expect(result.firstName).toBe('Anna');
+      expect(result.lastName).toBe('Puig');
+    });
+
+    it('normalizes an international phone before persisting', async () => {
+      await service.updateProfile(CUSTOMER_ID, {
+        firstName: 'Joan',
+        lastName: 'Costa',
+        phone: '+34 612 345 678',
+      });
+
+      expect(lastUpdateData().phone).toBe('+34612345678');
+    });
+
+    it('stores null when phone is an empty string', async () => {
+      await service.updateProfile(CUSTOMER_ID, {
+        firstName: 'Joan',
+        lastName: 'Costa',
+        phone: '',
+      });
+
+      expect(lastUpdateData().phone).toBeNull();
+    });
+
+    it('stores null when phone is whitespace only', async () => {
+      await service.updateProfile(CUSTOMER_ID, {
+        firstName: 'Joan',
+        lastName: 'Costa',
+        phone: '   ',
+      });
+
+      expect(lastUpdateData().phone).toBeNull();
+    });
+
+    it('stores null when phone is omitted', async () => {
+      await service.updateProfile(CUSTOMER_ID, {
+        firstName: 'Joan',
+        lastName: 'Costa',
+      });
+
+      expect(lastUpdateData().phone).toBeNull();
+    });
+
+    it('trims names before persisting', async () => {
+      await service.updateProfile(CUSTOMER_ID, {
+        firstName: '  Anna  ',
+        lastName: '  Puig  ',
+      });
+
+      expect(lastUpdateData().firstName).toBe('Anna');
+      expect(lastUpdateData().lastName).toBe('Puig');
+    });
+
+    it('accepts Unicode names with hyphens and apostrophes', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, {
+          firstName: 'José-María',
+          lastName: "O'Connor Ñoño",
+        }),
+      ).resolves.toBeDefined();
+      expect(prismaMock.customer.update).toHaveBeenCalledOnce();
+    });
+
+    it('rejects an empty firstName and does not write', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, { firstName: '', lastName: 'Costa' }),
+      ).rejects.toThrow('El nombre es obligatorio.');
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a whitespace-only firstName', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, { firstName: '   ', lastName: 'Costa' }),
+      ).rejects.toThrow(BadRequestException);
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects an empty lastName and does not write', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, { firstName: 'Joan', lastName: '' }),
+      ).rejects.toThrow('Los apellidos son obligatorios.');
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a phone without a + prefix', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, {
+          firstName: 'Joan',
+          lastName: 'Costa',
+          phone: '34612345678',
+        }),
+      ).rejects.toThrow('Introduce un teléfono internacional válido, por ejemplo +34 612 345 678.');
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a phone containing letters', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, {
+          firstName: 'Joan',
+          lastName: 'Costa',
+          phone: '+34 ABC 345 678',
+        }),
+      ).rejects.toThrow(BadRequestException);
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects a phone that is too short (<8 digits)', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, {
+          firstName: 'Joan',
+          lastName: 'Costa',
+          phone: '+1234567',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('rejects a phone that is too long (>15 digits)', async () => {
+      await expect(
+        service.updateProfile(CUSTOMER_ID, {
+          firstName: 'Joan',
+          lastName: 'Costa',
+          phone: '+1234567890123456',
+        }),
+      ).rejects.toThrow(BadRequestException);
+    });
+
+    it('writes ONLY firstName, lastName and phone — no other fields', async () => {
+      await service.updateProfile(CUSTOMER_ID, {
+        firstName: 'Joan',
+        lastName: 'Costa',
+        phone: '+34612345678',
+        // Any extra properties (would be stripped by the pipe) must never be written.
+        ...({ id: 'evil', email: 'evil@x.com', passwordHash: 'x', emailVerifiedAt: new Date() } as Record<string, unknown>),
+      } as never);
+
+      expect(Object.keys(lastUpdateData()).sort()).toEqual(
+        ['firstName', 'lastName', 'phone'].sort(),
+      );
+    });
+
+    it('updates only the authenticated id (from the argument, never the body)', async () => {
+      await service.updateProfile('the-real-user-id', {
+        firstName: 'Joan',
+        lastName: 'Costa',
+      });
+
+      expect(lastUpdateWhere().id).toBe('the-real-user-id');
+    });
+
+    it('response preserves emailVerified and phone from the persisted row', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(
+        profileRow({ phone: '+34612345678', emailVerifiedAt: new Date('2026-03-01T00:00:00Z') }),
+      );
+
+      const result = await service.updateProfile(CUSTOMER_ID, {
+        firstName: 'Joan',
+        lastName: 'Costa',
+        phone: '+34 612 345 678',
+      });
+
+      expect(result.emailVerified).toBe(true);
+      expect(result.phone).toBe('+34612345678');
+      expect(result).not.toHaveProperty('passwordHash');
+      expect(result).not.toHaveProperty('emailVerifiedAt');
     });
   });
 

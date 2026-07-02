@@ -12,6 +12,8 @@ import { EmailService } from '../email/email.service';
 import { PrismaService } from '../database/prisma.service';
 import type { LoginDto } from './dto/login.dto';
 import type { RegisterDto } from './dto/register.dto';
+import type { UpdateProfileDto } from './dto/update-profile.dto';
+import { normalizePhone } from './phone.util';
 
 // ─── Design notes ─────────────────────────────────────────────────────────────
 //
@@ -135,6 +137,7 @@ interface PrismaWithSessions {
         email: true;
         firstName: true;
         lastName: true;
+        phone: true;
         emailVerifiedAt: true;
       };
     }): Promise<{
@@ -142,6 +145,7 @@ interface PrismaWithSessions {
       email: string;
       firstName: string | null;
       lastName: string | null;
+      phone: string | null;
       emailVerifiedAt: Date | null;
     } | null>;
     create(args: {
@@ -175,7 +179,13 @@ interface PrismaWithSessions {
     }): Promise<{ count: number }>;
     update(args: {
       where: { id: string };
-      data: { passwordHash?: string; emailVerifiedAt?: Date };
+      data: {
+        passwordHash?: string;
+        emailVerifiedAt?: Date;
+        firstName?: string;
+        lastName?: string;
+        phone?: string | null;
+      };
     }): Promise<unknown>;
   };
   authSession: AuthSessionModel;
@@ -257,6 +267,17 @@ type CustomerProfile = {
   email: string;
   firstName: string | null;
   lastName: string | null;
+};
+
+// The public profile returned by GET/PATCH /auth/me. Phone is exposed; internal
+// timestamps (emailVerifiedAt, registeredAt, …) and secrets are never included.
+type PublicProfile = {
+  id: string;
+  email: string;
+  firstName: string | null;
+  lastName: string | null;
+  phone: string | null;
+  emailVerified: boolean;
 };
 
 function isPrismaUniqueConstraint(err: unknown): boolean {
@@ -480,9 +501,7 @@ export class AuthService {
     });
   }
 
-  async getMe(
-    userId: string,
-  ): Promise<CustomerProfile & { emailVerified: boolean }> {
+  async getMe(userId: string): Promise<PublicProfile> {
     const customer = await this.db.customer.findFirst({
       where: {
         id: userId,
@@ -493,6 +512,7 @@ export class AuthService {
         email: true,
         firstName: true,
         lastName: true,
+        phone: true,
         emailVerifiedAt: true,
       },
     });
@@ -507,8 +527,50 @@ export class AuthService {
       email: customer.email,
       firstName: customer.firstName,
       lastName: customer.lastName,
+      phone: customer.phone,
       emailVerified: customer.emailVerifiedAt !== null,
     };
+  }
+
+  /**
+   * Updates the authenticated customer's profile. Only firstName, lastName and
+   * phone are ever written — email, emailNormalized, emailVerifiedAt,
+   * passwordHash, registeredAt, sessions and tokens are untouched.
+   *
+   * `userId` comes exclusively from the validated JWT (never from the body), so
+   * a caller can only edit their own profile. Names are trimmed and required;
+   * phone is normalized via normalizePhone() and an invalid value is rejected
+   * with a controlled 400 rather than being silently dropped.
+   */
+  async updateProfile(
+    userId: string,
+    dto: UpdateProfileDto,
+  ): Promise<PublicProfile> {
+    const firstName = dto.firstName.trim();
+    const lastName = dto.lastName.trim();
+
+    if (firstName.length === 0) {
+      throw new BadRequestException('El nombre es obligatorio.');
+    }
+    if (lastName.length === 0) {
+      throw new BadRequestException('Los apellidos son obligatorios.');
+    }
+
+    const phoneResult = normalizePhone(dto.phone);
+    if (!phoneResult.ok) {
+      throw new BadRequestException(
+        'Introduce un teléfono internacional válido, por ejemplo +34 612 345 678.',
+      );
+    }
+
+    // Explicit field list — never spread the DTO/body into the update.
+    await this.db.customer.update({
+      where: { id: userId },
+      data: { firstName, lastName, phone: phoneResult.value },
+    });
+
+    // Return the same public shape as GET /auth/me (re-reads the row).
+    return this.getMe(userId);
   }
 
   async forgotPassword(email: string): Promise<void> {

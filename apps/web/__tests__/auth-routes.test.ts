@@ -636,6 +636,7 @@ describe('GET /api/auth/me', () => {
         email: 'user@example.com',
         firstName: 'Joan',
         lastName: 'Costa',
+        phone: '+34612345678',
         emailVerified: true,
         passwordHash: '$2b$12$shouldnotbeleaked',
         accessToken: 'should-not-leak',
@@ -657,6 +658,7 @@ describe('GET /api/auth/me', () => {
     expect(body.email).toBe('user@example.com');
     expect(body.firstName).toBe('Joan');
     expect(body.lastName).toBe('Costa');
+    expect(body.phone).toBe('+34612345678');
     // emailVerified boolean is forwarded
     expect(body.emailVerified).toBe(true);
     // Sensitive fields must NOT be present
@@ -1118,5 +1120,151 @@ describe('POST /api/auth/resend-verification', () => {
     expect(res.status).toBe(200);
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.success).toBe(true);
+  });
+});
+
+// ─── Profile update route (PATCH /api/auth/me) ────────────────────────────────
+
+describe('PATCH /api/auth/me', () => {
+  let handler: (req: NextRequest) => Promise<Response>;
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const mod = await import('@/app/api/auth/me/route');
+    handler = mod.PATCH;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('CSRF: cross-site request returns 403 without calling backend', async () => {
+    const req = makeRequest('PATCH', '/api/auth/me', { firstName: 'A', lastName: 'B' }, {
+      [COOKIE_NAME]: 'tok',
+    }, { 'sec-fetch-site': 'cross-site' });
+    const res = await handler(req);
+    expect(res.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('missing cookie: returns 401 without calling backend', async () => {
+    const req = makeRequest('PATCH', '/api/auth/me', { firstName: 'A', lastName: 'B' });
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('success: forwards Bearer + only editable fields, returns filtered profile', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        id: 'uuid-1',
+        email: 'user@example.com',
+        firstName: 'Anna',
+        lastName: 'Puig',
+        phone: '+34600111222',
+        emailVerified: true,
+        passwordHash: '$2b$12$secret',
+        accessToken: 'should-not-leak',
+      }),
+    );
+
+    const req = makeRequest('PATCH', '/api/auth/me', {
+      firstName: 'Anna',
+      lastName: 'Puig',
+      phone: '+34 600 111 222',
+      // Injected non-editable fields must not be forwarded.
+      id: 'evil-id',
+      email: 'evil@example.com',
+      passwordHash: 'evil',
+      emailVerifiedAt: '2020-01-01',
+    }, { [COOKIE_NAME]: 'auth-token-123' });
+
+    const res = await handler(req);
+    expect(res.status).toBe(200);
+
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.firstName).toBe('Anna');
+    expect(body.lastName).toBe('Puig');
+    expect(body.phone).toBe('+34600111222');
+    expect(body.emailVerified).toBe(true);
+    expect(body).not.toHaveProperty('accessToken');
+    expect(body).not.toHaveProperty('passwordHash');
+
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [
+      string,
+      RequestInit,
+    ];
+    expect(url).toContain('/auth/me');
+    expect(options.method).toBe('PATCH');
+    expect((options.headers as Record<string, string>)['Authorization']).toBe(
+      'Bearer auth-token-123',
+    );
+    // The forwarded body must contain only the editable fields.
+    const forwarded = JSON.parse(String(options.body)) as Record<string, unknown>;
+    expect(Object.keys(forwarded).sort()).toEqual(['firstName', 'lastName', 'phone'].sort());
+    expect(forwarded).not.toHaveProperty('id');
+    expect(forwarded).not.toHaveProperty('email');
+    expect(forwarded).not.toHaveProperty('passwordHash');
+  });
+
+  it('does not set or modify any cookie on success', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        id: 'uuid-1', email: 'u@e.com', firstName: 'A', lastName: 'B', phone: null, emailVerified: false,
+      }),
+    );
+
+    const req = makeRequest('PATCH', '/api/auth/me', { firstName: 'A', lastName: 'B' }, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('validation 400: forwards the message, never the HTTP error category', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(400, {
+        message: 'El nombre es obligatorio.',
+        error: 'Bad Request',
+        statusCode: 400,
+      }),
+    );
+
+    const req = makeRequest('PATCH', '/api/auth/me', { firstName: '', lastName: 'B' }, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe('El nombre es obligatorio.');
+    expect(body.error).not.toBe('Bad Request');
+  });
+
+  it('backend 401: returns 401', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(401, { message: 'Unauthorized' }));
+
+    const req = makeRequest('PATCH', '/api/auth/me', { firstName: 'A', lastName: 'B' }, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+  });
+
+  it('network error: returns 503 with a controlled message (no internals)', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+
+    const req = makeRequest('PATCH', '/api/auth/me', { firstName: 'A', lastName: 'B' }, {
+      [COOKIE_NAME]: 'auth-token-123',
+    });
+    const res = await handler(req);
+
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(typeof body.error).toBe('string');
+    expect(body.error).not.toContain('ECONNREFUSED');
   });
 });

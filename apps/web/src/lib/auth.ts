@@ -58,6 +58,7 @@ export interface AuthUser {
   email: string;
   firstName: string;
   lastName: string;
+  phone: string | null;
   emailVerified: boolean;
 }
 
@@ -80,6 +81,7 @@ export async function getCurrentUser(
       email: data.email ?? '',
       firstName: data.firstName ?? '',
       lastName: data.lastName ?? '',
+      phone: typeof data.phone === 'string' ? data.phone : null,
       emailVerified: data.emailVerified === true,
     };
   } catch {

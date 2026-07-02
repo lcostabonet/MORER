@@ -4,6 +4,7 @@ import {
   Controller,
   Get,
   HttpCode,
+  Patch,
   Post,
   Request,
   UseGuards,
@@ -16,6 +17,7 @@ import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
 import { ResetPasswordDto } from './dto/reset-password.dto';
+import { UpdateProfileDto } from './dto/update-profile.dto';
 import { VerifyEmailDto } from './dto/verify-email.dto';
 import { JwtAuthGuard } from './guards/jwt-auth.guard';
 
@@ -53,6 +55,19 @@ export class AuthController {
   @UseGuards(JwtAuthGuard)
   getMe(@Request() req: AuthenticatedRequest) {
     return this.authService.getMe(req.user.id);
+  }
+
+  @Patch('me')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  // whitelist strips any non-DTO property (id, email, passwordHash, …) from the
+  // body before it reaches the service — the authenticated id comes only from req.user.
+  @UsePipes(new ValidationPipe({ whitelist: true }))
+  updateProfile(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: UpdateProfileDto,
+  ) {
+    return this.authService.updateProfile(req.user.id, dto);
   }
 
   @Post('logout')
