@@ -3,6 +3,7 @@ import { render } from '@react-email/render';
 import { ConfirmEmailChangeEmail } from './templates/confirm-email-change';
 import { EmailChangedNoticeEmail } from './templates/email-changed-notice';
 import { OrderConfirmationEmail } from './templates/order-confirmation';
+import { PasswordChangedNoticeEmail } from './templates/password-changed-notice';
 import { PasswordResetEmail } from './templates/password-reset';
 import { ShippingConfirmationEmail } from './templates/shipping-confirmation';
 import { VerifyEmailEmail } from './templates/verify-email';
@@ -13,6 +14,8 @@ export { SUBJECT as CONFIRM_EMAIL_CHANGE_SUBJECT } from './templates/confirm-ema
 export type { EmailChangedNoticeData } from './templates/email-changed-notice';
 export { SUBJECT as EMAIL_CHANGED_NOTICE_SUBJECT } from './templates/email-changed-notice';
 export type { OrderConfirmationData } from './templates/order-confirmation';
+export type { PasswordChangedNoticeData } from './templates/password-changed-notice';
+export { SUBJECT as PASSWORD_CHANGED_NOTICE_SUBJECT } from './templates/password-changed-notice';
 export type { PasswordResetData } from './templates/password-reset';
 export { SUBJECT as PASSWORD_RESET_SUBJECT } from './templates/password-reset';
 export type { ShippingConfirmationData } from './templates/shipping-confirmation';
@@ -78,6 +81,14 @@ export async function renderEmailChangedNotice(
   data: import('./templates/email-changed-notice').EmailChangedNoticeData,
 ): Promise<string> {
   return render(React.createElement(EmailChangedNoticeEmail, data));
+}
+
+/**
+ * Renders the password_changed_notice template (sent to the current address).
+ * Uses @react-email/render which does not perform any network calls.
+ */
+export async function renderPasswordChangedNotice(): Promise<string> {
+  return render(React.createElement(PasswordChangedNoticeEmail));
 }
 
 /**

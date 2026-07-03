@@ -1485,3 +1485,126 @@ describe('POST /api/auth/email-change/confirm', () => {
     expect(body.error).not.toContain('ECONNREFUSED');
   });
 });
+
+// ─── Password-change route ────────────────────────────────────────────────────
+
+describe('POST /api/auth/password-change', () => {
+  let handler: (req: NextRequest) => Promise<Response>;
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const mod = await import('@/app/api/auth/password-change/route');
+    handler = mod.POST;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('CSRF: cross-site returns 403 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/password-change',
+      { currentPassword: 'a', newPassword: 'bbbbbbbb' },
+      { [COOKIE_NAME]: 'tok' }, { 'sec-fetch-site': 'cross-site' });
+    const res = await handler(req);
+    expect(res.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('missing cookie returns 401 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/password-change',
+      { currentPassword: 'a', newPassword: 'bbbbbbbb' });
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('success: forwards Bearer + only the two fields, clears the cookie', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        success: true,
+        message: 'Contraseña actualizada correctamente. Vuelve a iniciar sesión.',
+      }),
+    );
+
+    const req = makeRequest('POST', '/api/auth/password-change', {
+      currentPassword: 'oldpass',
+      newPassword: 'newpassword1',
+      // Injected extras must not be forwarded.
+      customerId: 'evil', revokeSessions: false,
+    }, { [COOKIE_NAME]: 'auth-token-123' });
+
+    const res = await handler(req);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/auth/password-change');
+    expect((options.headers as Record<string, string>)['Authorization']).toBe('Bearer auth-token-123');
+    const forwarded = JSON.parse(String(options.body)) as Record<string, unknown>;
+    expect(Object.keys(forwarded).sort()).toEqual(['currentPassword', 'newPassword'].sort());
+
+    // Cookie cleared (all sessions revoked)
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
+    expect(setCookie.toLowerCase()).toContain('morer_auth');
+  });
+
+  it('400: forwards the message, never the HTTP error category, and does NOT clear the cookie', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(400, { message: 'La contraseña actual no es correcta.', error: 'Bad Request' }),
+    );
+
+    const req = makeRequest('POST', '/api/auth/password-change',
+      { currentPassword: 'wrong', newPassword: 'newpassword1' },
+      { [COOKIE_NAME]: 'auth-token-123' });
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe('La contraseña actual no es correcta.');
+    expect(body.error).not.toBe('Bad Request');
+    // The cookie must NOT be cleared on a failed attempt.
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('backend 401 → 401 with a safe message (never the raw "Unauthorized")', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(401, { message: 'Unauthorized' }));
+    const req = makeRequest('POST', '/api/auth/password-change',
+      { currentPassword: 'a', newPassword: 'bbbbbbbb' }, { [COOKIE_NAME]: 'auth-token-123' });
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+    expect(res.headers.get('set-cookie')).toBeNull();
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).not.toBe('Unauthorized');
+    expect(typeof body.error).toBe('string');
+  });
+
+  it('backend 429 → 429 with a controlled message', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(429, { message: 'Too Many Requests' }));
+    const req = makeRequest('POST', '/api/auth/password-change',
+      { currentPassword: 'a', newPassword: 'bbbbbbbb' }, { [COOKIE_NAME]: 'auth-token-123' });
+    const res = await handler(req);
+    expect(res.status).toBe(429);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).not.toBe('Too Many Requests');
+  });
+
+  it('missing fields: returns 400 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/password-change',
+      { currentPassword: 'a' }, { [COOKIE_NAME]: 'tok' });
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('network error: returns 503 with a controlled message', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const req = makeRequest('POST', '/api/auth/password-change',
+      { currentPassword: 'a', newPassword: 'bbbbbbbb' }, { [COOKIE_NAME]: 'tok' });
+    const res = await handler(req);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).not.toContain('ECONNREFUSED');
+  });
+});

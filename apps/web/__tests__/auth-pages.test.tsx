@@ -1722,4 +1722,192 @@ describe('LoginForm email-changed banner', () => {
 
     expect(screen.queryByText(/correo actualizado correctamente/i)).not.toBeInTheDocument();
   });
+
+  it('shows the password-changed message when passwordChangedSuccess is set', async () => {
+    const { LoginForm } = await import('@/app/login/_components/LoginForm');
+    render(React.createElement(LoginForm, { next: null, passwordChangedSuccess: true }));
+
+    expect(
+      screen.getByText(/contraseña actualizada correctamente\. vuelve a iniciar sesión/i),
+    ).toBeInTheDocument();
+  });
+});
+
+// ─── PasswordChangeSection ────────────────────────────────────────────────────
+
+describe('PasswordChangeSection', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+    mockReplace.mockReset();
+    mockPush.mockReset();
+    mockRefresh.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderSection() {
+    const { PasswordChangeSection } = await import(
+      '@/app/account/_components/PasswordChangeSection'
+    );
+    return render(React.createElement(PasswordChangeSection));
+  }
+
+  async function openForm() {
+    await user.click(screen.getByRole('button', { name: /cambiar contraseña/i }));
+  }
+
+  it('hides the form initially behind a "Cambiar contraseña" button', async () => {
+    await renderSection();
+    expect(screen.getByRole('button', { name: /cambiar contraseña/i })).toBeInTheDocument();
+    expect(screen.queryByLabelText(/contraseña actual/i)).not.toBeInTheDocument();
+  });
+
+  it('opens the form with three fields and correct autocomplete', async () => {
+    await renderSection();
+    await openForm();
+
+    const current = screen.getByLabelText(/contraseña actual/i);
+    const next = screen.getByLabelText(/^nueva contraseña/i);
+    const confirm = screen.getByLabelText(/confirmar nueva contraseña/i);
+    expect(current).toHaveAttribute('type', 'password');
+    expect(current).toHaveAttribute('autocomplete', 'current-password');
+    expect(next).toHaveAttribute('autocomplete', 'new-password');
+    expect(confirm).toHaveAttribute('autocomplete', 'new-password');
+  });
+
+  it('validates required fields without calling the API', async () => {
+    await renderSection();
+    await openForm();
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    expect(await screen.findByText('Introduce tu contraseña actual.')).toBeInTheDocument();
+    expect(screen.getByText('Introduce una contraseña nueva.')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('blocks submit when the confirmation does not match', async () => {
+    await renderSection();
+    await openForm();
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'oldpassword');
+    await user.type(screen.getByLabelText(/^nueva contraseña/i), 'newpassword1');
+    await user.type(screen.getByLabelText(/confirmar nueva contraseña/i), 'different1');
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    expect(await screen.findByText('Las contraseñas nuevas no coinciden.')).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('blocks submit when the new password equals the current one', async () => {
+    await renderSection();
+    await openForm();
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'samepassword1');
+    await user.type(screen.getByLabelText(/^nueva contraseña/i), 'samepassword1');
+    await user.type(screen.getByLabelText(/confirmar nueva contraseña/i), 'samepassword1');
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    expect(
+      await screen.findByText('La nueva contraseña debe ser diferente de la actual.'),
+    ).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('enforces the 8–72 policy client-side', async () => {
+    await renderSection();
+    await openForm();
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'oldpassword');
+    await user.type(screen.getByLabelText(/^nueva contraseña/i), 'short');
+    await user.type(screen.getByLabelText(/confirmar nueva contraseña/i), 'short');
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    expect(
+      await screen.findByText('La contraseña debe tener entre 8 y 72 caracteres.'),
+    ).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('on success sends only the two password fields and redirects to login', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true, message: 'ok' }), { status: 200 }),
+    );
+
+    await renderSection();
+    await openForm();
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'oldpassword');
+    await user.type(screen.getByLabelText(/^nueva contraseña/i), 'newpassword1');
+    await user.type(screen.getByLabelText(/confirmar nueva contraseña/i), 'newpassword1');
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/login?passwordChanged=1'));
+
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/auth/password-change');
+    const body = JSON.parse(String(options.body)) as Record<string, unknown>;
+    expect(Object.keys(body).sort()).toEqual(['currentPassword', 'newPassword'].sort());
+    expect(body).not.toHaveProperty('confirmPassword');
+  });
+
+  it('on server error shows a safe message and does not redirect', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'La contraseña actual no es correcta.' }), { status: 400 }),
+    );
+
+    await renderSection();
+    await openForm();
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'wrongpass');
+    await user.type(screen.getByLabelText(/^nueva contraseña/i), 'newpassword1');
+    await user.type(screen.getByLabelText(/confirmar nueva contraseña/i), 'newpassword1');
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    expect(await screen.findByText(/la contraseña actual no es correcta/i)).toBeInTheDocument();
+    expect(screen.queryByText(/bad request/i)).not.toBeInTheDocument();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it('on a 401 (expired/revoked session) never renders the raw "Unauthorized"', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'Unauthorized' }), { status: 401 }),
+    );
+
+    await renderSection();
+    await openForm();
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'oldpassword');
+    await user.type(screen.getByLabelText(/^nueva contraseña/i), 'newpassword1');
+    await user.type(screen.getByLabelText(/confirmar nueva contraseña/i), 'newpassword1');
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    expect(await screen.findByText(/tu sesión ha caducado/i)).toBeInTheDocument();
+    expect(screen.queryByText(/unauthorized/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/bad request/i)).not.toBeInTheDocument();
+    expect(mockReplace).not.toHaveBeenCalled();
+  });
+
+  it('blocks a double submit while the request is in flight', async () => {
+    let resolveFetch: (value: Response) => void = () => {};
+    vi.mocked(fetch).mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      }) as unknown as ReturnType<typeof fetch>,
+    );
+
+    await renderSection();
+    await openForm();
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'oldpassword');
+    await user.type(screen.getByLabelText(/^nueva contraseña/i), 'newpassword1');
+    await user.type(screen.getByLabelText(/confirmar nueva contraseña/i), 'newpassword1');
+    await user.click(screen.getByRole('button', { name: /^cambiar contraseña$/i }));
+
+    const inFlight = screen.getByRole('button', { name: /guardando/i });
+    expect(inFlight).toBeDisabled();
+    await user.click(inFlight);
+
+    resolveFetch(new Response(JSON.stringify({ success: true, message: 'ok' }), { status: 200 }));
+    await waitFor(() => expect(mockReplace).toHaveBeenCalled());
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
 });

@@ -103,6 +103,7 @@ type EmailServiceMock = {
   sendVerificationEmail: ReturnType<typeof vi.fn>;
   sendEmailChangeConfirmation: ReturnType<typeof vi.fn>;
   sendEmailChangedNotice: ReturnType<typeof vi.fn>;
+  sendPasswordChangedNotice: ReturnType<typeof vi.fn>;
 };
 
 function createEmailServiceMock(): EmailServiceMock {
@@ -112,6 +113,7 @@ function createEmailServiceMock(): EmailServiceMock {
     sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
     sendEmailChangeConfirmation: vi.fn().mockResolvedValue(undefined),
     sendEmailChangedNotice: vi.fn().mockResolvedValue(undefined),
+    sendPasswordChangedNotice: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -208,6 +210,7 @@ describe('AuthService', () => {
     emailServiceMock.sendVerificationEmail.mockReset().mockResolvedValue(undefined);
     emailServiceMock.sendEmailChangeConfirmation.mockReset().mockResolvedValue(undefined);
     emailServiceMock.sendEmailChangedNotice.mockReset().mockResolvedValue(undefined);
+    emailServiceMock.sendPasswordChangedNotice.mockReset().mockResolvedValue(undefined);
 
     // Default bcrypt behaviour
     vi.mocked(bcrypt.hash).mockResolvedValue(PASSWORD_HASH as never);
@@ -1790,6 +1793,156 @@ describe('AuthService', () => {
       expect(prismaMock.emailChangeRequest.deleteMany).toHaveBeenCalledWith({
         where: { customerId: CUSTOMER_ID },
       });
+    });
+  });
+
+  // ─── changePassword ───────────────────────────────────────────────────────────
+
+  describe('changePassword', () => {
+    const CURRENT_PW = 'currentpassword';
+    const NEW_PW = 'newpassword456';
+    const NEW_HASH = '$2b$12$newpwhash';
+
+    function lastUpdateManyForCustomer() {
+      const calls = prismaMock.customer.updateMany.mock.calls;
+      return calls[calls.length - 1][0] as {
+        where: { id: string; passwordHash?: string };
+        data: Record<string, unknown>;
+      };
+    }
+
+    beforeEach(() => {
+      prismaMock.customer.findUnique.mockReset().mockResolvedValue(registeredCustomerFixture());
+      prismaMock.customer.updateMany.mockReset().mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockReset().mockResolvedValue({});
+      // compare(currentPassword, hash) → true; compare(newPassword, hash) → false.
+      vi.mocked(bcrypt.compare)
+        .mockReset()
+        .mockImplementation((plain: string) => Promise.resolve(plain === CURRENT_PW));
+      vi.mocked(bcrypt.hash).mockReset().mockResolvedValue(NEW_HASH as never);
+    });
+
+    it('swaps passwordHash with a concurrency guard on the previous hash', async () => {
+      await service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW);
+
+      expect(prismaMock.customer.updateMany).toHaveBeenCalledOnce();
+      const call = lastUpdateManyForCustomer();
+      expect(call.where.id).toBe(CUSTOMER_ID);
+      expect(call.where.passwordHash).toBe(PASSWORD_HASH); // the previously-read hash
+      expect(call.data.passwordHash).toBe(NEW_HASH);
+      // Only the hash is written — never email/profile.
+      expect(Object.keys(call.data)).toEqual(['passwordHash']);
+      // Non-guarded customer.update is never used.
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('rejects an incorrect current password and writes nothing', async () => {
+      vi.mocked(bcrypt.compare).mockImplementation(() => Promise.resolve(false));
+
+      await expect(
+        service.changePassword(CUSTOMER_ID, 'wrong', NEW_PW),
+      ).rejects.toThrow('La contraseña actual no es correcta.');
+      expect(prismaMock.customer.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects a new password equal to the current one', async () => {
+      // Both comparisons true → new equals current.
+      vi.mocked(bcrypt.compare).mockImplementation(() => Promise.resolve(true));
+
+      await expect(
+        service.changePassword(CUSTOMER_ID, CURRENT_PW, CURRENT_PW),
+      ).rejects.toThrow('La nueva contraseña debe ser diferente de la actual.');
+      expect(prismaMock.customer.updateMany).not.toHaveBeenCalled();
+    });
+
+    it('rejects a guest / passwordless account safely', async () => {
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ passwordHash: null }),
+      );
+
+      await expect(
+        service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW),
+      ).rejects.toThrow('No se puede cambiar la contraseña de esta cuenta.');
+    });
+
+    it('revokes ALL active sessions (including the caller\'s)', async () => {
+      await service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW);
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('invalidates password-reset tokens and pending email-change requests', async () => {
+      await service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW);
+
+      expect(prismaMock.passwordResetToken.deleteMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID },
+      });
+      expect(prismaMock.emailChangeRequest.deleteMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID },
+      });
+    });
+
+    it('sends a best-effort notice to the current email after success', async () => {
+      await service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW);
+
+      expect(emailServiceMock.sendPasswordChangedNotice).toHaveBeenCalledWith({
+        customerId: CUSTOMER_ID,
+        email: EMAIL_TRIMMED,
+      });
+    });
+
+    it('does not revert the change if the notice fails', async () => {
+      emailServiceMock.sendPasswordChangedNotice.mockRejectedValue(new Error('Resend down'));
+
+      await expect(
+        service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW),
+      ).resolves.toBeUndefined();
+      expect(prismaMock.customer.updateMany).toHaveBeenCalledOnce();
+    });
+
+    it('does not attempt a notice when the transaction fails', async () => {
+      prismaMock.customer.updateMany.mockResolvedValue({ count: 0 });
+
+      await expect(
+        service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW),
+      ).rejects.toThrow();
+      expect(emailServiceMock.sendPasswordChangedNotice).not.toHaveBeenCalled();
+    });
+
+    it('concurrency: second update with count 0 fails safely (guard requires count === 1)', async () => {
+      prismaMock.customer.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 });
+
+      await service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW); // first wins
+      await expect(
+        service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW),
+      ).rejects.toThrow(ConflictException);
+    });
+
+    it('propagates a DB error and does not send a notice (full rollback)', async () => {
+      prismaMock.customer.updateMany.mockRejectedValue(new Error('DB error'));
+
+      await expect(
+        service.changePassword(CUSTOMER_ID, CURRENT_PW, NEW_PW),
+      ).rejects.toThrow('DB error');
+      expect(emailServiceMock.sendPasswordChangedNotice).not.toHaveBeenCalled();
+    });
+
+    it('does not trim or normalize the passwords before hashing', async () => {
+      const padded = '  spaced-password  ';
+      // current comparison must succeed so we reach the hash step
+      vi.mocked(bcrypt.compare).mockImplementation((plain: string) =>
+        Promise.resolve(plain === CURRENT_PW),
+      );
+
+      await service.changePassword(CUSTOMER_ID, CURRENT_PW, padded);
+
+      // bcrypt.hash must receive the exact value, spaces intact.
+      expect(vi.mocked(bcrypt.hash).mock.calls[0][0]).toBe(padded);
     });
   });
 });

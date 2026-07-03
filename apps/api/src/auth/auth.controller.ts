@@ -14,6 +14,7 @@ import {
 } from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
+import { ChangePasswordDto } from './dto/change-password.dto';
 import { ConfirmEmailChangeDto } from './dto/confirm-email-change.dto';
 import { EmailChangeRequestDto } from './dto/email-change-request.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
@@ -183,5 +184,25 @@ export class AuthController {
   async confirmEmailChange(@Body() dto: ConfirmEmailChangeDto) {
     await this.authService.confirmEmailChange(dto.token);
     return { success: true };
+  }
+
+  @Post('password-change')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 5 } })
+  @UsePipes(new ValidationPipe({ whitelist: true }))
+  async changePassword(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: ChangePasswordDto,
+  ) {
+    await this.authService.changePassword(
+      req.user.id,
+      dto.currentPassword,
+      dto.newPassword,
+    );
+    return {
+      success: true,
+      message: 'Contraseña actualizada correctamente. Vuelve a iniciar sesión.',
+    };
   }
 }

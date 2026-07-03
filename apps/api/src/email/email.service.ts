@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OrderStatus } from '@morer/database';
 import { Resend } from 'resend';
-import { renderConfirmEmailChange, renderEmailChangedNotice, renderOrderConfirmation, renderPasswordReset, renderShippingConfirmation, renderVerifyEmail, renderWelcome } from '@morer/emails';
+import { renderConfirmEmailChange, renderEmailChangedNotice, renderOrderConfirmation, renderPasswordChangedNotice, renderPasswordReset, renderShippingConfirmation, renderVerifyEmail, renderWelcome } from '@morer/emails';
 import { PrismaService } from '../database/prisma.service';
 
 const CURRENCY = 'EUR';
@@ -596,6 +596,45 @@ export class EmailService {
     } catch (err) {
       const code = err instanceof Error ? err.name : 'UNKNOWN';
       console.warn(`[email] Failed to send email-changed notice`, {
+        customerId: params.customerId,
+        code,
+      });
+    }
+  }
+
+  /**
+   * Best-effort notice to the customer's current address after a password
+   * change. Failures are swallowed (logged only) — the change is already
+   * committed and must not be reverted. The email body carries no password,
+   * hash, token, id or login link; logs never include the address.
+   */
+  async sendPasswordChangedNotice(params: {
+    customerId: string;
+    email: string;
+  }): Promise<void> {
+    try {
+      const html = await renderPasswordChangedNotice();
+
+      const { error } = await this.resend.emails.send({
+        from: this.fromAddress,
+        to: params.email,
+        subject: 'La contraseña de tu cuenta MORER ha cambiado',
+        html,
+      });
+
+      if (error) {
+        const code = (error as unknown as Record<string, unknown>)['name'] ?? 'UNKNOWN';
+        console.warn(`[email] Provider error sending password-changed notice`, {
+          customerId: params.customerId,
+          code,
+        });
+        return;
+      }
+
+      console.log(`[email] Password-changed notice sent — customer: ${params.customerId}`);
+    } catch (err) {
+      const code = err instanceof Error ? err.name : 'UNKNOWN';
+      console.warn(`[email] Failed to send password-changed notice`, {
         customerId: params.customerId,
         code,
       });

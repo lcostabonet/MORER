@@ -12,9 +12,15 @@ interface LoginFormProps {
   next: string | null;
   resetSuccess?: boolean;
   emailChangedSuccess?: boolean;
+  passwordChangedSuccess?: boolean;
 }
 
-export function LoginForm({ next, resetSuccess, emailChangedSuccess }: LoginFormProps) {
+export function LoginForm({
+  next,
+  resetSuccess,
+  emailChangedSuccess,
+  passwordChangedSuccess,
+}: LoginFormProps) {
   const router = useRouter();
 
   const [email, setEmail] = useState('');
@@ -88,6 +94,15 @@ export function LoginForm({ next, resetSuccess, emailChangedSuccess }: LoginForm
         <div className="bg-stone-50 border border-stone-200 rounded-sm p-4" role="status">
           <p className="text-sm text-stone-700">
             Correo actualizado correctamente. Inicia sesión con tu nueva dirección.
+          </p>
+        </div>
+      )}
+
+      {/* Password-changed success banner */}
+      {passwordChangedSuccess && (
+        <div className="bg-stone-50 border border-stone-200 rounded-sm p-4" role="status">
+          <p className="text-sm text-stone-700">
+            Contraseña actualizada correctamente. Vuelve a iniciar sesión.
           </p>
         </div>
       )}

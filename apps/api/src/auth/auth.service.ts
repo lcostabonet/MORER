@@ -173,14 +173,16 @@ interface PrismaWithSessions {
       lastName: string | null;
     }>;
     updateMany(args: {
+      // Guest promotion uses { passwordHash: null, registeredAt: null }; the
+      // password-change concurrency guard uses { passwordHash: <previous hash> }.
       where: {
         id: string;
-        passwordHash: null;
-        registeredAt: null;
+        passwordHash?: string | null;
+        registeredAt?: null;
       };
       data: {
-        passwordHash: string;
-        registeredAt: Date;
+        passwordHash?: string;
+        registeredAt?: Date;
         firstName?: string | null;
         lastName?: string | null;
       };
@@ -1124,6 +1126,86 @@ export class AuthService {
       });
     } catch {
       this.logger.warn('email-changed-notice-error', { customerId });
+    }
+  }
+
+  // ─── Password change ──────────────────────────────────────────────────────────
+
+  /**
+   * Changes the authenticated customer's password.
+   *
+   * Requires the current password (bcrypt) and rejects reusing it. In ONE
+   * transaction: swap the hash with a concurrency guard (updateMany WHERE the
+   * stored hash still equals the one we verified, requiring count === 1), revoke
+   * ALL active sessions (including the caller's), and delete every pending
+   * password-reset token and email-change request. `userId` comes only from the
+   * validated JWT. Passwords are never trimmed/normalized, logged, or returned.
+   * A best-effort notice is sent to the current address after commit.
+   */
+  async changePassword(
+    userId: string,
+    currentPassword: string,
+    newPassword: string,
+  ): Promise<void> {
+    const customer = await this.db.customer.findUnique({ where: { id: userId } });
+    if (!customer || !customer.passwordHash || !customer.registeredAt) {
+      // Guest / passwordless account cannot use this flow. Do not reveal details.
+      throw new BadRequestException('No se puede cambiar la contraseña de esta cuenta.');
+    }
+
+    // Snapshot the current hash so the transactional update can guard on it.
+    const currentHash = customer.passwordHash;
+
+    const matches = await bcrypt.compare(currentPassword, currentHash);
+    if (!matches) {
+      throw new BadRequestException('La contraseña actual no es correcta.');
+    }
+
+    const sameAsCurrent = await bcrypt.compare(newPassword, currentHash);
+    if (sameAsCurrent) {
+      throw new BadRequestException('La nueva contraseña debe ser diferente de la actual.');
+    }
+
+    // Hash outside the transaction — bcrypt is expensive and must not block the tx.
+    const newHash = await bcrypt.hash(newPassword, BCRYPT_ROUNDS);
+    const now = new Date();
+
+    await (this._db as {
+      $transaction(fn: (tx: PrismaWithSessions) => Promise<void>): Promise<void>;
+    }).$transaction(async (tx) => {
+      // Concurrency guard: only succeed if the stored hash is still the one we
+      // verified. Two concurrent changes from the same old password → only one
+      // gets count === 1; the loser (count 0) fails without partial writes.
+      const updated = await tx.customer.updateMany({
+        where: { id: userId, passwordHash: currentHash },
+        data: { passwordHash: newHash },
+      });
+
+      if (updated.count !== 1) {
+        throw new ConflictException(
+          'No se ha podido actualizar la contraseña. Inténtalo de nuevo.',
+        );
+      }
+
+      // Revoke every active session — including the caller's.
+      await tx.authSession.updateMany({
+        where: { customerId: userId, revokedAt: null },
+        data: { revokedAt: now },
+      });
+
+      // Any pending reset link or email-change request is now void.
+      await tx.passwordResetToken.deleteMany({ where: { customerId: userId } });
+      await tx.emailChangeRequest.deleteMany({ where: { customerId: userId } });
+    });
+
+    // Best-effort notice to the current address — never reverts the change.
+    try {
+      await this.emailService.sendPasswordChangedNotice({
+        customerId: userId,
+        email: customer.email,
+      });
+    } catch {
+      this.logger.warn('password-changed-notice-error', { customerId: userId });
     }
   }
 }

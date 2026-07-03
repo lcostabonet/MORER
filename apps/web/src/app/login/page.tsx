@@ -7,11 +7,16 @@ export const metadata: Metadata = {
 };
 
 interface PageProps {
-  searchParams: Promise<{ next?: string; reset?: string; emailChanged?: string }>;
+  searchParams: Promise<{
+    next?: string;
+    reset?: string;
+    emailChanged?: string;
+    passwordChanged?: string;
+  }>;
 }
 
 export default async function LoginPage({ searchParams }: PageProps) {
-  const { next, reset, emailChanged } = await searchParams;
+  const { next, reset, emailChanged, passwordChanged } = await searchParams;
 
   // Validate redirect server-side too — only pass safe paths to client
   const safeNext =
@@ -21,6 +26,7 @@ export default async function LoginPage({ searchParams }: PageProps) {
 
   const resetSuccess = reset === '1';
   const emailChangedSuccess = emailChanged === '1';
+  const passwordChangedSuccess = passwordChanged === '1';
 
   return (
     <div className="max-w-md mx-auto px-4 sm:px-6 py-24">
@@ -34,6 +40,7 @@ export default async function LoginPage({ searchParams }: PageProps) {
         next={safeNext}
         resetSuccess={resetSuccess}
         emailChangedSuccess={emailChangedSuccess}
+        passwordChangedSuccess={passwordChangedSuccess}
       />
     </div>
   );

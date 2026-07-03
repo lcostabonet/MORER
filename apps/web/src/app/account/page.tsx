@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
 import { LogoutButton } from './_components/LogoutButton';
 import { ProfileCard } from './_components/ProfileCard';
+import { PasswordChangeSection } from './_components/PasswordChangeSection';
 import { LogoutAllButton } from '@/components/logout-all-button';
 
 export const metadata: Metadata = {
@@ -43,6 +44,9 @@ export default async function AccountPage() {
         emailVerified={user.emailVerified}
         pendingEmailChange={user.pendingEmailChange}
       />
+
+      {/* Password change — separate security section */}
+      <PasswordChangeSection />
 
       {/* Quick links */}
       <div className="space-y-3">
