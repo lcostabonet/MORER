@@ -11,9 +11,10 @@ type FormError = 'invalid_credentials' | 'too_many_requests' | 'service_error' |
 interface LoginFormProps {
   next: string | null;
   resetSuccess?: boolean;
+  emailChangedSuccess?: boolean;
 }
 
-export function LoginForm({ next, resetSuccess }: LoginFormProps) {
+export function LoginForm({ next, resetSuccess, emailChangedSuccess }: LoginFormProps) {
   const router = useRouter();
 
   const [email, setEmail] = useState('');
@@ -78,6 +79,15 @@ export function LoginForm({ next, resetSuccess }: LoginFormProps) {
         <div className="bg-stone-50 border border-stone-200 rounded-sm p-4" role="status">
           <p className="text-sm text-stone-700">
             Contraseña actualizada. Inicia sesión de nuevo.
+          </p>
+        </div>
+      )}
+
+      {/* Email-changed success banner */}
+      {emailChangedSuccess && (
+        <div className="bg-stone-50 border border-stone-200 rounded-sm p-4" role="status">
+          <p className="text-sm text-stone-700">
+            Correo actualizado correctamente. Inicia sesión con tu nueva dirección.
           </p>
         </div>
       )}

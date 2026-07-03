@@ -41,6 +41,7 @@ export default async function AccountPage() {
         email={user.email}
         phone={user.phone}
         emailVerified={user.emailVerified}
+        pendingEmailChange={user.pendingEmailChange}
       />
 
       {/* Quick links */}

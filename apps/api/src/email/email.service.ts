@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { OrderStatus } from '@morer/database';
 import { Resend } from 'resend';
-import { renderOrderConfirmation, renderPasswordReset, renderShippingConfirmation, renderVerifyEmail, renderWelcome } from '@morer/emails';
+import { renderConfirmEmailChange, renderEmailChangedNotice, renderOrderConfirmation, renderPasswordReset, renderShippingConfirmation, renderVerifyEmail, renderWelcome } from '@morer/emails';
 import { PrismaService } from '../database/prisma.service';
 
 const CURRENCY = 'EUR';
@@ -516,4 +516,99 @@ export class EmailService {
       });
     }
   }
+
+  /**
+   * Sends the email-change confirmation to the NEW address.
+   *
+   * Unlike the other transactional emails, this one RE-THROWS on failure: the
+   * caller (AuthService.requestEmailChange) needs to know delivery failed so it
+   * can roll back the just-created pending request. Never logs PII: only a
+   * customerId and a coarse error code appear in logs.
+   */
+  async sendEmailChangeConfirmation(params: {
+    customerId: string;
+    newEmail: string;
+    confirmUrl: string;
+  }): Promise<void> {
+    try {
+      const html = await renderConfirmEmailChange({ confirmUrl: params.confirmUrl });
+
+      const { error } = await this.resend.emails.send({
+        from: this.fromAddress,
+        to: params.newEmail,
+        subject: 'Confirma tu nuevo correo de MORER',
+        html,
+      });
+
+      if (error) {
+        const code = (error as unknown as Record<string, unknown>)['name'] ?? 'UNKNOWN';
+        console.warn(`[email] Provider error sending email-change confirmation`, {
+          customerId: params.customerId,
+          code,
+        });
+        throw new Error('email-change-confirmation-send-failed');
+      }
+
+      console.log(`[email] Email-change confirmation sent — customer: ${params.customerId}`);
+    } catch (err) {
+      const code = err instanceof Error ? err.name : 'UNKNOWN';
+      console.warn(`[email] Failed to send email-change confirmation`, {
+        customerId: params.customerId,
+        code,
+      });
+      throw err instanceof Error ? err : new Error('email-change-confirmation-send-failed');
+    }
+  }
+
+  /**
+   * Best-effort security notice to the OLD address after an email change is
+   * confirmed. Failures are swallowed (logged only) — the change is already
+   * committed and must not be reverted. The new address is masked in the body;
+   * no token, password, hash, id or login link is ever included.
+   */
+  async sendEmailChangedNotice(params: {
+    customerId: string;
+    oldEmail: string;
+    newEmail: string;
+  }): Promise<void> {
+    try {
+      const html = await renderEmailChangedNotice({
+        maskedNewEmail: maskEmail(params.newEmail),
+      });
+
+      const { error } = await this.resend.emails.send({
+        from: this.fromAddress,
+        to: params.oldEmail,
+        subject: 'El correo de tu cuenta MORER ha cambiado',
+        html,
+      });
+
+      if (error) {
+        const code = (error as unknown as Record<string, unknown>)['name'] ?? 'UNKNOWN';
+        console.warn(`[email] Provider error sending email-changed notice`, {
+          customerId: params.customerId,
+          code,
+        });
+        return;
+      }
+
+      console.log(`[email] Email-changed notice sent — customer: ${params.customerId}`);
+    } catch (err) {
+      const code = err instanceof Error ? err.name : 'UNKNOWN';
+      console.warn(`[email] Failed to send email-changed notice`, {
+        customerId: params.customerId,
+        code,
+      });
+    }
+  }
+}
+
+// Partially masks an email address for display in the change notice, e.g.
+// "nuevo@example.com" -> "n***@example.com". Never reveals the full address.
+function maskEmail(email: string): string {
+  const at = email.indexOf('@');
+  if (at <= 0) return '***';
+  const local = email.slice(0, at);
+  const domain = email.slice(at + 1);
+  return `${local[0]}***@${domain}`;
 }

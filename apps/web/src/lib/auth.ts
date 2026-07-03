@@ -53,6 +53,11 @@ export function getWebOrigin(): string {
   return origin;
 }
 
+export interface PendingEmailChange {
+  newEmail: string;
+  expiresAt: string;
+}
+
 export interface AuthUser {
   id: string;
   email: string;
@@ -60,6 +65,20 @@ export interface AuthUser {
   lastName: string;
   phone: string | null;
   emailVerified: boolean;
+  pendingEmailChange: PendingEmailChange | null;
+}
+
+// Defensively coerce the pendingEmailChange field from an untrusted API body
+// into a clean { newEmail, expiresAt } | null shape.
+export function normalizePendingEmailChange(
+  value: unknown,
+): PendingEmailChange | null {
+  if (value === null || typeof value !== 'object') return null;
+  const v = value as { newEmail?: unknown; expiresAt?: unknown };
+  if (typeof v.newEmail !== 'string' || typeof v.expiresAt !== 'string') {
+    return null;
+  }
+  return { newEmail: v.newEmail, expiresAt: v.expiresAt };
 }
 
 export async function getCurrentUser(
@@ -83,6 +102,7 @@ export async function getCurrentUser(
       lastName: data.lastName ?? '',
       phone: typeof data.phone === 'string' ? data.phone : null,
       emailVerified: data.emailVerified === true,
+      pendingEmailChange: normalizePendingEmailChange(data.pendingEmailChange),
     };
   } catch {
     return null;

@@ -1,5 +1,10 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getApiUrl, COOKIE_NAME, clearAuthCookies } from '@/lib/auth';
+import {
+  getApiUrl,
+  COOKIE_NAME,
+  clearAuthCookies,
+  normalizePendingEmailChange,
+} from '@/lib/auth';
 import { checkCsrf } from '@/lib/csrf';
 import type { AuthUser } from '@/lib/auth';
 
@@ -13,6 +18,7 @@ function publicProfile(user: AuthUser) {
     lastName: user.lastName,
     phone: typeof user.phone === 'string' ? user.phone : null,
     emailVerified: user.emailVerified === true,
+    pendingEmailChange: normalizePendingEmailChange(user.pendingEmailChange),
   };
 }
 

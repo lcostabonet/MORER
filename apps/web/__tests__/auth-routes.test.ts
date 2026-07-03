@@ -638,6 +638,7 @@ describe('GET /api/auth/me', () => {
         lastName: 'Costa',
         phone: '+34612345678',
         emailVerified: true,
+        pendingEmailChange: { newEmail: 'nuevo@example.com', expiresAt: '2026-07-03T12:00:00.000Z' },
         passwordHash: '$2b$12$shouldnotbeleaked',
         accessToken: 'should-not-leak',
       }),
@@ -661,6 +662,11 @@ describe('GET /api/auth/me', () => {
     expect(body.phone).toBe('+34612345678');
     // emailVerified boolean is forwarded
     expect(body.emailVerified).toBe(true);
+    // pendingEmailChange is forwarded (only newEmail + expiresAt)
+    expect(body.pendingEmailChange).toEqual({
+      newEmail: 'nuevo@example.com',
+      expiresAt: '2026-07-03T12:00:00.000Z',
+    });
     // Sensitive fields must NOT be present
     expect(body).not.toHaveProperty('accessToken');
     expect(body).not.toHaveProperty('passwordHash');
@@ -1265,6 +1271,217 @@ describe('PATCH /api/auth/me', () => {
     expect(res.status).toBe(503);
     const body = (await res.json()) as Record<string, unknown>;
     expect(typeof body.error).toBe('string');
+    expect(body.error).not.toContain('ECONNREFUSED');
+  });
+});
+
+// ─── Email-change request route ───────────────────────────────────────────────
+
+describe('POST /api/auth/email-change/request', () => {
+  let handler: (req: NextRequest) => Promise<Response>;
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const mod = await import('@/app/api/auth/email-change/request/route');
+    handler = mod.POST;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('CSRF: cross-site returns 403 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/email-change/request',
+      { newEmail: 'n@e.com', currentPassword: 'x' },
+      { [COOKIE_NAME]: 'tok' }, { 'sec-fetch-site': 'cross-site' });
+    const res = await handler(req);
+    expect(res.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('missing cookie returns 401 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/email-change/request',
+      { newEmail: 'n@e.com', currentPassword: 'x' });
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('success: forwards Bearer + only the two fields, returns success message', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, {
+        success: true,
+        message: 'Hemos enviado un enlace de confirmación a tu nueva dirección.',
+      }),
+    );
+
+    const req = makeRequest('POST', '/api/auth/email-change/request', {
+      newEmail: 'nuevo@example.com',
+      currentPassword: 'secret',
+      // Injected extras must not be forwarded.
+      customerId: 'evil', email: 'evil@e.com',
+    }, { [COOKIE_NAME]: 'auth-token-123' });
+
+    const res = await handler(req);
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    expect(typeof body.message).toBe('string');
+
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/auth/email-change/request');
+    expect((options.headers as Record<string, string>)['Authorization']).toBe('Bearer auth-token-123');
+    const forwarded = JSON.parse(String(options.body)) as Record<string, unknown>;
+    expect(Object.keys(forwarded).sort()).toEqual(['currentPassword', 'newEmail'].sort());
+  });
+
+  it('400 from API: forwards the message, never the HTTP error category', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(400, { message: 'Ese correo electrónico ya está en uso.', error: 'Bad Request' }),
+    );
+
+    const req = makeRequest('POST', '/api/auth/email-change/request',
+      { newEmail: 'taken@example.com', currentPassword: 'secret' },
+      { [COOKIE_NAME]: 'auth-token-123' });
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toBe('Ese correo electrónico ya está en uso.');
+    expect(body.error).not.toBe('Bad Request');
+  });
+
+  it('missing fields: returns 400 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/email-change/request',
+      { newEmail: 'n@e.com' }, { [COOKIE_NAME]: 'tok' });
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('network error: returns 503 with a controlled message', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const req = makeRequest('POST', '/api/auth/email-change/request',
+      { newEmail: 'n@e.com', currentPassword: 'x' }, { [COOKIE_NAME]: 'tok' });
+    const res = await handler(req);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).not.toContain('ECONNREFUSED');
+  });
+});
+
+// ─── Email-change cancel route ────────────────────────────────────────────────
+
+describe('DELETE /api/auth/email-change', () => {
+  let handler: (req: NextRequest) => Promise<Response>;
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const mod = await import('@/app/api/auth/email-change/route');
+    handler = mod.DELETE;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('CSRF: cross-site returns 403 without calling backend', async () => {
+    const req = makeRequest('DELETE', '/api/auth/email-change', undefined,
+      { [COOKIE_NAME]: 'tok' }, { 'sec-fetch-site': 'cross-site' });
+    const res = await handler(req);
+    expect(res.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('missing cookie returns 401', async () => {
+    const req = makeRequest('DELETE', '/api/auth/email-change');
+    const res = await handler(req);
+    expect(res.status).toBe(401);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('success: forwards Bearer DELETE and returns success', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(200, { success: true }));
+    const req = makeRequest('DELETE', '/api/auth/email-change', undefined, { [COOKIE_NAME]: 'auth-token-123' });
+    const res = await handler(req);
+    expect(res.status).toBe(200);
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/auth/email-change');
+    expect(options.method).toBe('DELETE');
+    expect((options.headers as Record<string, string>)['Authorization']).toBe('Bearer auth-token-123');
+  });
+});
+
+// ─── Email-change confirm route ───────────────────────────────────────────────
+
+describe('POST /api/auth/email-change/confirm', () => {
+  let handler: (req: NextRequest) => Promise<Response>;
+
+  beforeEach(async () => {
+    vi.stubGlobal('fetch', vi.fn());
+    const mod = await import('@/app/api/auth/email-change/confirm/route');
+    handler = mod.POST;
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('CSRF: cross-site returns 403 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/email-change/confirm', { token: 'x' },
+      {}, { 'sec-fetch-site': 'cross-site' });
+    const res = await handler(req);
+    expect(res.status).toBe(403);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('success: clears the auth cookie and returns success', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(makeFetchResponse(200, { success: true }));
+    const req = makeRequest('POST', '/api/auth/email-change/confirm', { token: 'good-token' });
+    const res = await handler(req);
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.success).toBe(true);
+    // Cookie cleared (all sessions revoked)
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toMatch(/Max-Age=0|expires=Thu, 01 Jan 1970/i);
+    expect(setCookie.toLowerCase()).toContain('morer_auth');
+  });
+
+  it('invalid token (400): forwards the generic message, never the HTTP category', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(400, {
+        message: 'El enlace de cambio de correo no es válido, ha caducado o la dirección ya no está disponible.',
+        error: 'Bad Request',
+      }),
+    );
+
+    const req = makeRequest('POST', '/api/auth/email-change/confirm', { token: 'used-token' });
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.error).toContain('no es válido');
+    expect(body.error).not.toBe('Bad Request');
+    // No cookie is set on failure
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('missing token: returns 400 without calling backend', async () => {
+    const req = makeRequest('POST', '/api/auth/email-change/confirm', { notToken: 'x' });
+    const res = await handler(req);
+    expect(res.status).toBe(400);
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('network error: returns 503 with the generic message', async () => {
+    vi.mocked(fetch).mockRejectedValueOnce(new Error('ECONNREFUSED'));
+    const req = makeRequest('POST', '/api/auth/email-change/confirm', { token: 'x' });
+    const res = await handler(req);
+    expect(res.status).toBe(503);
+    const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).not.toContain('ECONNREFUSED');
   });
 });

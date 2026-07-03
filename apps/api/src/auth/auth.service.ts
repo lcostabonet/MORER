@@ -3,6 +3,7 @@ import {
   ConflictException,
   Injectable,
   Logger,
+  ServiceUnavailableException,
   UnauthorizedException,
 } from '@nestjs/common';
 import { JwtService } from '@nestjs/jwt';
@@ -60,6 +61,7 @@ import { normalizePhone } from './phone.util';
 const BCRYPT_ROUNDS = 12;
 const RESET_TOKEN_EXPIRY_MS = 30 * 60 * 1000;
 const EMAIL_VERIFY_TOKEN_EXPIRY_MS = 24 * 60 * 60 * 1000; // 24 hours
+const EMAIL_CHANGE_TOKEN_EXPIRY_MS = 60 * 60 * 1000; // 60 minutes
 const JWT_EXPIRY = '7d';
 
 // Shared, centralized message for every invalid email-verification case so the
@@ -67,6 +69,12 @@ const JWT_EXPIRY = '7d';
 // caused the failure.
 const INVALID_VERIFICATION_MSG =
   'El enlace de verificación no es válido o ha caducado.';
+
+// Single generic message for every invalid email-change confirmation case
+// (unknown / used / replaced / expired / malformed / snapshot stale / target
+// email now taken). Never reveals which specific condition failed.
+const INVALID_EMAIL_CHANGE_MSG =
+  'El enlace de cambio de correo no es válido, ha caducado o la dirección ya no está disponible.';
 
 // Computed once at startup to provide constant-time comparison when the
 // user does not exist or is a guest. bcrypt.compare always returns false
@@ -185,6 +193,8 @@ interface PrismaWithSessions {
         firstName?: string;
         lastName?: string;
         phone?: string | null;
+        email?: string;
+        emailNormalized?: string;
       };
     }): Promise<unknown>;
   };
@@ -223,6 +233,9 @@ interface PrismaWithSessions {
       };
       data: { usedAt: Date };
     }): Promise<{ count: number }>;
+    deleteMany(args: {
+      where: { customerId: string };
+    }): Promise<{ count: number }>;
   };
   emailVerificationToken: {
     upsert(args: {
@@ -258,6 +271,82 @@ interface PrismaWithSessions {
       };
       data: { usedAt: Date };
     }): Promise<{ count: number }>;
+    deleteMany(args: {
+      where: { customerId: string };
+    }): Promise<{ count: number }>;
+  };
+  emailChangeRequest: {
+    // Token lookup (public confirm flow) — includes the owning customer.
+    findUnique(args: {
+      where: { tokenHash: string };
+      include: {
+        customer: {
+          select: {
+            id: true;
+            email: true;
+            emailNormalized: true;
+            passwordHash: true;
+            registeredAt: true;
+          };
+        };
+      };
+    }): Promise<{
+      id: string;
+      customerId: string;
+      currentEmailNormalized: string;
+      newEmail: string;
+      newEmailNormalized: string;
+      tokenHash: string;
+      expiresAt: Date;
+      usedAt: Date | null;
+      customer: {
+        id: string;
+        email: string;
+        emailNormalized: string;
+        passwordHash: string | null;
+        registeredAt: Date | null;
+      } | null;
+    } | null>;
+    // Pending lookup by owner (for /auth/me) — no token/hash exposed.
+    findUnique(args: { where: { customerId: string } }): Promise<{
+      id: string;
+      customerId: string;
+      newEmail: string;
+      newEmailNormalized: string;
+      expiresAt: Date;
+      usedAt: Date | null;
+    } | null>;
+    upsert(args: {
+      where: { customerId: string };
+      create: {
+        customerId: string;
+        currentEmailNormalized: string;
+        newEmail: string;
+        newEmailNormalized: string;
+        tokenHash: string;
+        expiresAt: Date;
+      };
+      update: {
+        currentEmailNormalized: string;
+        newEmail: string;
+        newEmailNormalized: string;
+        tokenHash: string;
+        expiresAt: Date;
+        usedAt: null;
+      };
+    }): Promise<unknown>;
+    updateMany(args: {
+      where: {
+        id: string;
+        tokenHash: string;
+        usedAt: null;
+        expiresAt: { gt: Date };
+      };
+      data: { usedAt: Date };
+    }): Promise<{ count: number }>;
+    deleteMany(args: {
+      where: { customerId: string };
+    }): Promise<{ count: number }>;
   };
 }
 // ─────────────────────────────────────────────────────────────────────────────
@@ -271,6 +360,8 @@ type CustomerProfile = {
 
 // The public profile returned by GET/PATCH /auth/me. Phone is exposed; internal
 // timestamps (emailVerifiedAt, registeredAt, …) and secrets are never included.
+// pendingEmailChange exposes only the target address and expiry — never the
+// token, hash, or the current-email snapshot.
 type PublicProfile = {
   id: string;
   email: string;
@@ -278,6 +369,7 @@ type PublicProfile = {
   lastName: string | null;
   phone: string | null;
   emailVerified: boolean;
+  pendingEmailChange: { newEmail: string; expiresAt: string } | null;
 };
 
 function isPrismaUniqueConstraint(err: unknown): boolean {
@@ -521,6 +613,8 @@ export class AuthService {
       throw new UnauthorizedException();
     }
 
+    const pendingEmailChange = await this.getPendingEmailChange(userId);
+
     // Expose only a boolean — never the raw emailVerifiedAt timestamp.
     return {
       id: customer.id,
@@ -529,7 +623,25 @@ export class AuthService {
       lastName: customer.lastName,
       phone: customer.phone,
       emailVerified: customer.emailVerifiedAt !== null,
+      pendingEmailChange,
     };
+  }
+
+  /**
+   * Returns the customer's active email-change target (only newEmail + expiry),
+   * or null when there is none, it was already used, or it has expired. Never
+   * exposes the token, hash, or the current-email snapshot.
+   */
+  private async getPendingEmailChange(
+    customerId: string,
+  ): Promise<{ newEmail: string; expiresAt: string } | null> {
+    const req = await this.db.emailChangeRequest.findUnique({
+      where: { customerId },
+    });
+    if (!req) return null;
+    if (req.usedAt) return null;
+    if (req.expiresAt <= new Date()) return null;
+    return { newEmail: req.newEmail, expiresAt: req.expiresAt.toISOString() };
   }
 
   /**
@@ -661,6 +773,13 @@ export class AuthService {
         where: { customerId: resetRecord.customerId, revokedAt: null },
         data: { revokedAt: now },
       });
+
+      // A password recovery must cancel any email change started beforehand:
+      // the confirmation link may have been sent to an address the attacker
+      // controls, so it must not survive the account owner regaining control.
+      await tx.emailChangeRequest.deleteMany({
+        where: { customerId: resetRecord.customerId },
+      });
     });
   }
 
@@ -788,5 +907,223 @@ export class AuthService {
         data: { emailVerifiedAt: now },
       });
     });
+  }
+
+  // ─── Email change ───────────────────────────────────────────────────────────
+
+  /**
+   * Starts an email change for the authenticated customer.
+   *
+   * Requires the current password (bcrypt). The current email is NOT touched —
+   * only a pending request (upsert by customerId, replacing any prior one) is
+   * created and a confirmation link is sent to the NEW address. If the email
+   * cannot be delivered, the just-created request is removed so no un-sendable
+   * "pending change" lingers, and a generic 503 is returned.
+   *
+   * `userId` comes only from the validated JWT. Public error messages never
+   * reveal the password, the full emails, or which check failed beyond the
+   * three intended cases.
+   */
+  async requestEmailChange(
+    userId: string,
+    newEmailRaw: string,
+    currentPassword: string,
+  ): Promise<void> {
+    const customer = await this.db.customer.findUnique({ where: { id: userId } });
+    if (!customer || !customer.passwordHash || !customer.registeredAt) {
+      // Behind JwtAuthGuard this should not happen; treat as unauthenticated.
+      throw new UnauthorizedException();
+    }
+
+    const passwordMatch = await bcrypt.compare(currentPassword, customer.passwordHash);
+    if (!passwordMatch) {
+      throw new BadRequestException('La contraseña actual no es correcta.');
+    }
+
+    const newEmail = newEmailRaw.trim();
+    const newEmailNormalized = newEmail.toLowerCase();
+
+    if (newEmailNormalized === customer.emailNormalized) {
+      throw new BadRequestException('El nuevo correo debe ser diferente del actual.');
+    }
+
+    const taken = await this.db.customer.findUnique({
+      where: { emailNormalized: newEmailNormalized },
+    });
+    if (taken) {
+      throw new BadRequestException('Ese correo electrónico ya está en uso.');
+    }
+
+    const rawToken = randomBytes(32).toString('base64url');
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const expiresAt = new Date(Date.now() + EMAIL_CHANGE_TOKEN_EXPIRY_MS);
+
+    await this.db.emailChangeRequest.upsert({
+      where: { customerId: customer.id },
+      create: {
+        customerId: customer.id,
+        currentEmailNormalized: customer.emailNormalized,
+        newEmail,
+        newEmailNormalized,
+        tokenHash,
+        expiresAt,
+      },
+      update: {
+        currentEmailNormalized: customer.emailNormalized,
+        newEmail,
+        newEmailNormalized,
+        tokenHash,
+        expiresAt,
+        usedAt: null,
+      },
+    });
+
+    const webUrl = process.env.WEB_URL ?? 'https://morer.com';
+    const confirmUrl =
+      webUrl + '/confirm-email-change?token=' + encodeURIComponent(rawToken);
+
+    try {
+      await this.emailService.sendEmailChangeConfirmation({
+        customerId: customer.id,
+        newEmail,
+        confirmUrl,
+      });
+    } catch {
+      // Roll back the just-issued request so /account does not show a pending
+      // change whose confirmation email never arrived. Never reveal details.
+      try {
+        await this.db.emailChangeRequest.deleteMany({ where: { customerId: customer.id } });
+      } catch {
+        this.logger.warn('email-change-cleanup-error', { customerId: customer.id });
+      }
+      this.logger.warn('email-change-confirmation-error', { customerId: customer.id });
+      throw new ServiceUnavailableException(
+        'No se ha podido enviar el correo de confirmación. Inténtalo de nuevo más tarde.',
+      );
+    }
+  }
+
+  /**
+   * Cancels the authenticated customer's pending email change. Idempotent and
+   * scoped strictly to their own request. No password required (cancelling only
+   * reduces risk), no email sent, and the current email is never modified.
+   */
+  async cancelEmailChange(userId: string): Promise<void> {
+    await this.db.emailChangeRequest.deleteMany({ where: { customerId: userId } });
+  }
+
+  /**
+   * Confirms an email change from a raw token (public endpoint).
+   *
+   * Validates the token, the customer, the current-email snapshot (the account
+   * email must not have changed since the request), and that the target address
+   * is still free. Then, in ONE transaction: consume the token (conditional
+   * updateMany, count === 1), switch Customer.email/emailNormalized and mark it
+   * verified, revoke all sessions, and delete the password-reset and
+   * email-verification tokens (which may have been sent to the OLD address).
+   * A unique-constraint race on emailNormalized maps to the same generic 400.
+   * After a successful commit, a best-effort notice is sent to the OLD address.
+   */
+  async confirmEmailChange(rawToken: string): Promise<void> {
+    const tokenHash = createHash('sha256').update(rawToken).digest('hex');
+    const now = new Date();
+
+    const record = await this.db.emailChangeRequest.findUnique({
+      where: { tokenHash },
+      include: {
+        customer: {
+          select: {
+            id: true,
+            email: true,
+            emailNormalized: true,
+            passwordHash: true,
+            registeredAt: true,
+          },
+        },
+      },
+    });
+
+    if (!record) throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+    if (record.usedAt) throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+    if (record.expiresAt <= now) throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+
+    const customer = record.customer;
+    if (!customer?.passwordHash || !customer?.registeredAt) {
+      throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+    }
+    // Snapshot guard: the account email must be the same one that was current
+    // when the change was requested. If it changed since, this link is stale.
+    if (customer.emailNormalized !== record.currentEmailNormalized) {
+      throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+    }
+
+    // Re-check final availability against Customer (the source of truth).
+    const taken = await this.db.customer.findUnique({
+      where: { emailNormalized: record.newEmailNormalized },
+    });
+    if (taken) throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+
+    const oldEmail = customer.email;
+    const newEmail = record.newEmail;
+    const newEmailNormalized = record.newEmailNormalized;
+    const customerId = customer.id;
+
+    try {
+      await (this._db as {
+        $transaction(fn: (tx: PrismaWithSessions) => Promise<void>): Promise<void>;
+      }).$transaction(async (tx) => {
+        // Atomic consume — re-check conditions inside the transaction.
+        const consumed = await tx.emailChangeRequest.updateMany({
+          where: {
+            id: record.id,
+            tokenHash,
+            usedAt: null,
+            expiresAt: { gt: now },
+          },
+          data: { usedAt: now },
+        });
+
+        if (consumed.count !== 1) {
+          throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+        }
+
+        await tx.customer.update({
+          where: { id: customerId },
+          data: {
+            email: newEmail,
+            emailNormalized: newEmailNormalized,
+            emailVerifiedAt: now,
+          },
+        });
+
+        // Revoke every active session — the user must re-authenticate.
+        await tx.authSession.updateMany({
+          where: { customerId, revokedAt: null },
+          data: { revokedAt: now },
+        });
+
+        // These tokens may have been sent to the OLD address — invalidate them.
+        await tx.passwordResetToken.deleteMany({ where: { customerId } });
+        await tx.emailVerificationToken.deleteMany({ where: { customerId } });
+      });
+    } catch (err) {
+      // A concurrent confirmation that already took the email hits the unique
+      // constraint on Customer.emailNormalized → same generic message.
+      if (isPrismaUniqueConstraint(err)) {
+        throw new BadRequestException(INVALID_EMAIL_CHANGE_MSG);
+      }
+      throw err;
+    }
+
+    // Best-effort security notice to the OLD address — never reverts the change.
+    try {
+      await this.emailService.sendEmailChangedNotice({
+        customerId,
+        oldEmail,
+        newEmail,
+      });
+    } catch {
+      this.logger.warn('email-changed-notice-error', { customerId });
+    }
   }
 }

@@ -138,6 +138,7 @@ model Customer {
   sessions AuthSession[]
   passwordResetToken     PasswordResetToken?
   emailVerificationToken EmailVerificationToken?
+  emailChangeRequest     EmailChangeRequest?
 
   @@map("customers")
 }
@@ -327,4 +328,23 @@ model EmailVerificationToken {
 
   @@index([expiresAt])
   @@map("email_verification_tokens")
+}
+
+model EmailChangeRequest {
+  id                     String    @id @default(cuid())
+  customerId             String    @unique
+  currentEmailNormalized String
+  newEmail               String
+  newEmailNormalized     String
+  tokenHash              String    @unique
+  expiresAt              DateTime
+  usedAt                 DateTime?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([newEmailNormalized])
+  @@index([expiresAt])
+  @@map("email_change_requests")
 }

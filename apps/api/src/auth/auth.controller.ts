@@ -2,6 +2,7 @@ import {
   BadRequestException,
   Body,
   Controller,
+  Delete,
   Get,
   HttpCode,
   Patch,
@@ -13,6 +14,8 @@ import {
 } from '@nestjs/common';
 import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
 import { AuthService } from './auth.service';
+import { ConfirmEmailChangeDto } from './dto/confirm-email-change.dto';
+import { EmailChangeRequestDto } from './dto/email-change-request.dto';
 import { ForgotPasswordDto } from './dto/forgot-password.dto';
 import { LoginDto } from './dto/login.dto';
 import { RegisterDto } from './dto/register.dto';
@@ -142,5 +145,43 @@ export class AuthController {
       message:
         'Si tu correo está pendiente de verificación, recibirás un nuevo enlace.',
     };
+  }
+
+  @Post('email-change/request')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 3 } })
+  @UsePipes(new ValidationPipe({ whitelist: true }))
+  async requestEmailChange(
+    @Request() req: AuthenticatedRequest,
+    @Body() dto: EmailChangeRequestDto,
+  ) {
+    await this.authService.requestEmailChange(
+      req.user.id,
+      dto.newEmail,
+      dto.currentPassword,
+    );
+    return {
+      success: true,
+      message: 'Hemos enviado un enlace de confirmación a tu nueva dirección.',
+    };
+  }
+
+  @Delete('email-change')
+  @HttpCode(200)
+  @UseGuards(JwtAuthGuard)
+  async cancelEmailChange(@Request() req: AuthenticatedRequest) {
+    await this.authService.cancelEmailChange(req.user.id);
+    return { success: true };
+  }
+
+  @Post('email-change/confirm')
+  @HttpCode(200)
+  @UseGuards(ThrottlerGuard)
+  @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 10 } })
+  @UsePipes(new ValidationPipe({ whitelist: true }))
+  async confirmEmailChange(@Body() dto: ConfirmEmailChangeDto) {
+    await this.authService.confirmEmailChange(dto.token);
+    return { success: true };
   }
 }

@@ -1223,12 +1223,14 @@ describe('ProfileCard', () => {
     email: string;
     phone: string | null;
     emailVerified: boolean;
+    pendingEmailChange: { newEmail: string; expiresAt: string } | null;
   } = {
     firstName: 'Joan',
     lastName: 'Costa',
     email: 'joan@example.com',
     phone: '+34612345678',
     emailVerified: true,
+    pendingEmailChange: null,
   };
 
   beforeEach(() => {
@@ -1465,5 +1467,259 @@ describe('ProfileCard', () => {
     ];
     const body = JSON.parse(String(options.body)) as { phone: unknown };
     expect(body.phone).toBeNull();
+  });
+});
+
+// ─── EmailChangeSection ───────────────────────────────────────────────────────
+
+describe('EmailChangeSection', () => {
+  let user: ReturnType<typeof userEvent.setup>;
+
+  beforeEach(() => {
+    user = userEvent.setup();
+    vi.stubGlobal('fetch', vi.fn());
+    mockReplace.mockReset();
+    mockRefresh.mockReset();
+    mockPush.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderSection(
+    pendingEmailChange: { newEmail: string; expiresAt: string } | null = null,
+  ) {
+    const { EmailChangeSection } = await import(
+      '@/app/account/_components/EmailChangeSection'
+    );
+    return render(React.createElement(EmailChangeSection, { pendingEmailChange }));
+  }
+
+  it('starts with the form hidden behind a "Cambiar correo electrónico" button', async () => {
+    await renderSection(null);
+    expect(
+      screen.getByRole('button', { name: /cambiar correo electrónico/i }),
+    ).toBeInTheDocument();
+    expect(screen.queryByLabelText(/nuevo correo/i)).not.toBeInTheDocument();
+  });
+
+  it('opens the form with new-email and current-password fields', async () => {
+    await renderSection(null);
+    await user.click(screen.getByRole('button', { name: /cambiar correo electrónico/i }));
+
+    const email = screen.getByLabelText(/nuevo correo/i);
+    const password = screen.getByLabelText(/contraseña actual/i);
+    expect(email).toHaveAttribute('autocomplete', 'email');
+    expect(password).toHaveAttribute('autocomplete', 'current-password');
+    expect(password).toHaveAttribute('type', 'password');
+  });
+
+  it('validates email and password client-side before calling the API', async () => {
+    await renderSection(null);
+    await user.click(screen.getByRole('button', { name: /cambiar correo electrónico/i }));
+
+    await user.type(screen.getByLabelText(/nuevo correo/i), 'not-an-email');
+    await user.click(screen.getByRole('button', { name: /enviar enlace de confirmación/i }));
+
+    expect(await screen.findByText(/correo electrónico válido/i)).toBeInTheDocument();
+    expect(screen.getByText(/introduce tu contraseña actual/i)).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('on success shows the confirmation message and refreshes', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(
+        JSON.stringify({
+          success: true,
+          message: 'Hemos enviado un enlace de confirmación a tu nueva dirección.',
+        }),
+        { status: 200 },
+      ),
+    );
+
+    await renderSection(null);
+    await user.click(screen.getByRole('button', { name: /cambiar correo electrónico/i }));
+    await user.type(screen.getByLabelText(/nuevo correo/i), 'nuevo@example.com');
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'mypassword');
+    await user.click(screen.getByRole('button', { name: /enviar enlace de confirmación/i }));
+
+    expect(
+      await screen.findByText(/hemos enviado un enlace de confirmación/i),
+    ).toBeInTheDocument();
+    expect(mockRefresh).toHaveBeenCalled();
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/auth/email-change/request');
+    expect(options.method).toBe('POST');
+  });
+
+  it('on server error keeps the form and typed values and shows the message', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'La contraseña actual no es correcta.' }), { status: 400 }),
+    );
+
+    await renderSection(null);
+    await user.click(screen.getByRole('button', { name: /cambiar correo electrónico/i }));
+    await user.type(screen.getByLabelText(/nuevo correo/i), 'nuevo@example.com');
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'wrongpass');
+    await user.click(screen.getByRole('button', { name: /enviar enlace de confirmación/i }));
+
+    expect(await screen.findByText(/la contraseña actual no es correcta/i)).toBeInTheDocument();
+    expect(screen.getByLabelText(/nuevo correo/i)).toHaveValue('nuevo@example.com');
+  });
+
+  it('blocks a double submit while the request is in flight', async () => {
+    let resolveFetch: (value: Response) => void = () => {};
+    vi.mocked(fetch).mockReturnValueOnce(
+      new Promise<Response>((resolve) => {
+        resolveFetch = resolve;
+      }) as unknown as ReturnType<typeof fetch>,
+    );
+
+    await renderSection(null);
+    await user.click(screen.getByRole('button', { name: /cambiar correo electrónico/i }));
+    await user.type(screen.getByLabelText(/nuevo correo/i), 'nuevo@example.com');
+    await user.type(screen.getByLabelText(/contraseña actual/i), 'mypassword');
+    await user.click(screen.getByRole('button', { name: /enviar enlace de confirmación/i }));
+
+    const inFlight = screen.getByRole('button', { name: /enviando/i });
+    expect(inFlight).toBeDisabled();
+    await user.click(inFlight);
+
+    resolveFetch(new Response(JSON.stringify({ success: true, message: 'ok' }), { status: 200 }));
+    await screen.findByText('ok');
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('shows the pending change with the target email and a cancel button', async () => {
+    await renderSection({
+      newEmail: 'nuevo@example.com',
+      expiresAt: '2026-07-03T12:00:00.000Z',
+    });
+
+    expect(screen.getByText(/cambio pendiente a:/i)).toBeInTheDocument();
+    expect(screen.getByText('nuevo@example.com')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /cancelar solicitud/i })).toBeInTheDocument();
+  });
+
+  it('cancel calls DELETE and refreshes', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderSection({ newEmail: 'nuevo@example.com', expiresAt: '2026-07-03T12:00:00.000Z' });
+    await user.click(screen.getByRole('button', { name: /cancelar solicitud/i }));
+
+    await waitFor(() => expect(mockRefresh).toHaveBeenCalled());
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/auth/email-change');
+    expect(options.method).toBe('DELETE');
+  });
+});
+
+// ─── ConfirmEmailChangeClient ─────────────────────────────────────────────────
+
+describe('ConfirmEmailChangeClient', () => {
+  beforeEach(() => {
+    vi.stubGlobal('fetch', vi.fn());
+    mockReplace.mockReset();
+    mockPush.mockReset();
+    mockRefresh.mockReset();
+  });
+
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  async function renderConfirm(token: string) {
+    const { ConfirmEmailChangeClient } = await import(
+      '@/app/confirm-email-change/_components/ConfirmEmailChangeClient'
+    );
+    return render(React.createElement(ConfirmEmailChangeClient, { token }));
+  }
+
+  it('POSTs the token and on success redirects to /login?emailChanged=1', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ success: true }), { status: 200 }),
+    );
+
+    await renderConfirm('valid-token');
+
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/login?emailChanged=1'));
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/auth/email-change/confirm');
+    expect(options.method).toBe('POST');
+  });
+
+  it('on failure shows the generic message and strips the token from the URL', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'nope' }), { status: 400 }),
+    );
+
+    await renderConfirm('used-token');
+
+    expect(
+      await screen.findByText(/enlace de cambio de correo no es válido/i),
+    ).toBeInTheDocument();
+    expect(screen.queryByText(/bad request/i)).not.toBeInTheDocument();
+    expect(screen.queryByText(/unauthorized/i)).not.toBeInTheDocument();
+    await waitFor(() => expect(mockReplace).toHaveBeenCalledWith('/confirm-email-change'));
+  });
+
+  it('shows the generic message and does not fetch when no token is present', async () => {
+    await renderConfirm('');
+    expect(
+      await screen.findByText(/enlace de cambio de correo no es válido/i),
+    ).toBeInTheDocument();
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('re-render with token="" after failure does not re-run or overwrite the result', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      new Response(JSON.stringify({ error: 'nope' }), { status: 400 }),
+    );
+
+    const { ConfirmEmailChangeClient } = await import(
+      '@/app/confirm-email-change/_components/ConfirmEmailChangeClient'
+    );
+    const view = render(React.createElement(ConfirmEmailChangeClient, { token: 'used-token' }));
+
+    expect(
+      await screen.findByText(/enlace de cambio de correo no es válido/i),
+    ).toBeInTheDocument();
+
+    view.rerender(React.createElement(ConfirmEmailChangeClient, { token: '' }));
+
+    expect(
+      screen.getByText(/enlace de cambio de correo no es válido/i),
+    ).toBeInTheDocument();
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+});
+
+// ─── LoginForm email-changed banner ───────────────────────────────────────────
+
+describe('LoginForm email-changed banner', () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+    vi.resetModules();
+  });
+
+  it('shows the email-changed message when emailChangedSuccess is set', async () => {
+    const { LoginForm } = await import('@/app/login/_components/LoginForm');
+    render(React.createElement(LoginForm, { next: null, emailChangedSuccess: true }));
+
+    expect(
+      screen.getByText(/correo actualizado correctamente\. inicia sesión con tu nueva dirección/i),
+    ).toBeInTheDocument();
+  });
+
+  it('does not show the banner by default', async () => {
+    const { LoginForm } = await import('@/app/login/_components/LoginForm');
+    render(React.createElement(LoginForm, { next: null }));
+
+    expect(screen.queryByText(/correo actualizado correctamente/i)).not.toBeInTheDocument();
   });
 });

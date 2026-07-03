@@ -2,7 +2,9 @@
 
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
+import type { PendingEmailChange } from '@/lib/auth';
 import { EmailVerificationStatus } from './EmailVerificationStatus';
+import { EmailChangeSection } from './EmailChangeSection';
 
 interface ProfileCardProps {
   firstName: string;
@@ -10,6 +12,7 @@ interface ProfileCardProps {
   email: string;
   phone: string | null;
   emailVerified: boolean;
+  pendingEmailChange: PendingEmailChange | null;
 }
 
 const GENERIC_ERROR = 'No se ha podido actualizar el perfil. Inténtalo de nuevo.';
@@ -35,6 +38,7 @@ export function ProfileCard({
   email,
   phone,
   emailVerified,
+  pendingEmailChange,
 }: ProfileCardProps) {
   const router = useRouter();
 
@@ -194,6 +198,7 @@ export function ProfileCard({
               <dd className="text-sm text-stone-900 flex-1">
                 <span className="block mb-3">{email}</span>
                 <EmailVerificationStatus verified={emailVerified} />
+                <EmailChangeSection pendingEmailChange={pendingEmailChange} />
               </dd>
             </div>
             <div className="flex flex-col sm:flex-row sm:gap-8">

@@ -7,7 +7,12 @@ import {
   it,
   vi,
 } from 'vitest';
-import { BadRequestException, ConflictException, UnauthorizedException } from '@nestjs/common';
+import {
+  BadRequestException,
+  ConflictException,
+  ServiceUnavailableException,
+  UnauthorizedException,
+} from '@nestjs/common';
 
 // ─── Module-level mocks (hoisted by Vitest) ───────────────────────────────────
 //
@@ -45,11 +50,19 @@ type PrismaMockWithReset = PrismaMock & {
     findUnique: ReturnType<typeof vi.fn>;
     upsert: ReturnType<typeof vi.fn>;
     updateMany: ReturnType<typeof vi.fn>;
+    deleteMany: ReturnType<typeof vi.fn>;
   };
   emailVerificationToken: {
     findUnique: ReturnType<typeof vi.fn>;
     upsert: ReturnType<typeof vi.fn>;
     updateMany: ReturnType<typeof vi.fn>;
+    deleteMany: ReturnType<typeof vi.fn>;
+  };
+  emailChangeRequest: {
+    findUnique: ReturnType<typeof vi.fn>;
+    upsert: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
+    deleteMany: ReturnType<typeof vi.fn>;
   };
 };
 
@@ -60,15 +73,23 @@ function createPrismaMockWithReset(): PrismaMockWithReset {
     findUnique: vi.fn().mockResolvedValue(null),
     upsert: vi.fn().mockResolvedValue({}),
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
   };
   extended.emailVerificationToken = {
     findUnique: vi.fn().mockResolvedValue(null),
     upsert: vi.fn().mockResolvedValue({}),
     updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
   };
-  // $transaction for resetPassword / verifyEmail: pass the extended mock as the
-  // tx arg so passwordResetToken / emailVerificationToken / customer /
-  // authSession delegates are available inside the transaction callback.
+  extended.emailChangeRequest = {
+    findUnique: vi.fn().mockResolvedValue(null),
+    upsert: vi.fn().mockResolvedValue({}),
+    updateMany: vi.fn().mockResolvedValue({ count: 1 }),
+    deleteMany: vi.fn().mockResolvedValue({ count: 0 }),
+  };
+  // $transaction for resetPassword / verifyEmail / confirmEmailChange: pass the
+  // extended mock as the tx arg so all token / customer / authSession delegates
+  // are available inside the transaction callback.
   extended.$transaction = vi.fn().mockImplementation(
     async (cb: (tx: unknown) => unknown) => cb(extended),
   );
@@ -80,6 +101,8 @@ type EmailServiceMock = {
   sendWelcomeEmailIfNeeded: ReturnType<typeof vi.fn>;
   sendPasswordResetEmail: ReturnType<typeof vi.fn>;
   sendVerificationEmail: ReturnType<typeof vi.fn>;
+  sendEmailChangeConfirmation: ReturnType<typeof vi.fn>;
+  sendEmailChangedNotice: ReturnType<typeof vi.fn>;
 };
 
 function createEmailServiceMock(): EmailServiceMock {
@@ -87,6 +110,8 @@ function createEmailServiceMock(): EmailServiceMock {
     sendWelcomeEmailIfNeeded: vi.fn().mockResolvedValue(undefined),
     sendPasswordResetEmail: vi.fn().mockResolvedValue(undefined),
     sendVerificationEmail: vi.fn().mockResolvedValue(undefined),
+    sendEmailChangeConfirmation: vi.fn().mockResolvedValue(undefined),
+    sendEmailChangedNotice: vi.fn().mockResolvedValue(undefined),
   };
 }
 
@@ -163,16 +188,26 @@ describe('AuthService', () => {
     prismaMock.passwordResetToken.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.passwordResetToken.upsert.mockReset().mockResolvedValue({});
     prismaMock.passwordResetToken.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.passwordResetToken.deleteMany.mockReset().mockResolvedValue({ count: 0 });
 
     // Reset emailVerificationToken mock fns
     prismaMock.emailVerificationToken.findUnique.mockReset().mockResolvedValue(null);
     prismaMock.emailVerificationToken.upsert.mockReset().mockResolvedValue({});
     prismaMock.emailVerificationToken.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.emailVerificationToken.deleteMany.mockReset().mockResolvedValue({ count: 0 });
+
+    // Reset emailChangeRequest mock fns
+    prismaMock.emailChangeRequest.findUnique.mockReset().mockResolvedValue(null);
+    prismaMock.emailChangeRequest.upsert.mockReset().mockResolvedValue({});
+    prismaMock.emailChangeRequest.updateMany.mockReset().mockResolvedValue({ count: 1 });
+    prismaMock.emailChangeRequest.deleteMany.mockReset().mockResolvedValue({ count: 0 });
 
     // Reset emailService mock
     emailServiceMock.sendWelcomeEmailIfNeeded.mockReset().mockResolvedValue(undefined);
     emailServiceMock.sendPasswordResetEmail.mockReset().mockResolvedValue(undefined);
     emailServiceMock.sendVerificationEmail.mockReset().mockResolvedValue(undefined);
+    emailServiceMock.sendEmailChangeConfirmation.mockReset().mockResolvedValue(undefined);
+    emailServiceMock.sendEmailChangedNotice.mockReset().mockResolvedValue(undefined);
 
     // Default bcrypt behaviour
     vi.mocked(bcrypt.hash).mockResolvedValue(PASSWORD_HASH as never);
@@ -492,7 +527,12 @@ describe('AuthService', () => {
 
       const result = await service.getMe(CUSTOMER_ID);
 
-      expect(result).toEqual({ ...profileFixture(), phone: null, emailVerified: false });
+      expect(result).toEqual({
+        ...profileFixture(),
+        phone: null,
+        emailVerified: false,
+        pendingEmailChange: null,
+      });
       expect(result).not.toHaveProperty('passwordHash');
       // The raw timestamp must never be exposed — only the boolean.
       expect(result).not.toHaveProperty('emailVerifiedAt');
@@ -519,6 +559,57 @@ describe('AuthService', () => {
 
       expect(result.emailVerified).toBe(true);
       expect(result).not.toHaveProperty('emailVerifiedAt');
+    });
+
+    it('exposes an active pending email change (newEmail + expiresAt only)', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({
+        ...profileFixture(),
+        phone: null,
+        emailVerifiedAt: new Date('2026-02-01T00:00:00Z'),
+      });
+      const expiresAt = new Date(Date.now() + 30 * 60 * 1000);
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue({
+        id: 'ecr-1',
+        customerId: CUSTOMER_ID,
+        newEmail: 'nuevo@example.com',
+        newEmailNormalized: 'nuevo@example.com',
+        expiresAt,
+        usedAt: null,
+      });
+
+      const result = await service.getMe(CUSTOMER_ID);
+
+      expect(result.pendingEmailChange).toEqual({
+        newEmail: 'nuevo@example.com',
+        expiresAt: expiresAt.toISOString(),
+      });
+      // Never leak token / hash / current-email snapshot.
+      expect(JSON.stringify(result)).not.toContain('tokenHash');
+      expect(JSON.stringify(result)).not.toContain('currentEmailNormalized');
+    });
+
+    it('does not expose a used or expired pending email change', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({
+        ...profileFixture(),
+        phone: null,
+        emailVerifiedAt: null,
+      });
+      // used
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValueOnce({
+        id: 'ecr-1', customerId: CUSTOMER_ID, newEmail: 'x@example.com',
+        newEmailNormalized: 'x@example.com', expiresAt: new Date(Date.now() + 1000), usedAt: new Date(),
+      });
+      expect((await service.getMe(CUSTOMER_ID)).pendingEmailChange).toBeNull();
+
+      // expired
+      prismaMock.customer.findFirst.mockResolvedValue({
+        ...profileFixture(), phone: null, emailVerifiedAt: null,
+      });
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValueOnce({
+        id: 'ecr-1', customerId: CUSTOMER_ID, newEmail: 'x@example.com',
+        newEmailNormalized: 'x@example.com', expiresAt: new Date(Date.now() - 1000), usedAt: null,
+      });
+      expect((await service.getMe(CUSTOMER_ID)).pendingEmailChange).toBeNull();
     });
 
     it('throws UnauthorizedException when customer not found or has no passwordHash', async () => {
@@ -1362,6 +1453,343 @@ describe('AuthService', () => {
       prismaMock.customer.update.mockRejectedValue(new Error('DB error'));
 
       await expect(service.verifyEmail(RAW_TOKEN)).rejects.toThrow('DB error');
+    });
+  });
+
+  // ─── requestEmailChange ───────────────────────────────────────────────────────
+
+  describe('requestEmailChange', () => {
+    const NEW_EMAIL = 'nuevo@example.com';
+
+    function lastUpsert() {
+      const calls = prismaMock.emailChangeRequest.upsert.mock.calls;
+      return calls[calls.length - 1][0] as {
+        where: { customerId: string };
+        create: {
+          customerId: string;
+          currentEmailNormalized: string;
+          newEmail: string;
+          newEmailNormalized: string;
+          tokenHash: string;
+        };
+        update: { tokenHash: string; usedAt: null; newEmailNormalized: string };
+      };
+    }
+
+    beforeEach(() => {
+      // customer.findUnique is called twice: by id (the caller) and by
+      // emailNormalized (availability). Default: caller exists, target is free.
+      prismaMock.customer.findUnique
+        .mockReset()
+        .mockImplementation((args: { where: { id?: string; emailNormalized?: string } }) =>
+          Promise.resolve(args.where.id ? registeredCustomerFixture() : null),
+        );
+      vi.mocked(bcrypt.compare).mockResolvedValue(true as never);
+    });
+
+    it('creates a pending request and sends the confirmation for a correct password', async () => {
+      await service.requestEmailChange(CUSTOMER_ID, NEW_EMAIL, PASSWORD);
+
+      expect(prismaMock.emailChangeRequest.upsert).toHaveBeenCalledOnce();
+      const call = lastUpsert();
+      expect(call.where.customerId).toBe(CUSTOMER_ID);
+      expect(call.create.currentEmailNormalized).toBe(EMAIL_NORMALIZED);
+      expect(call.create.newEmail).toBe(NEW_EMAIL);
+      expect(call.create.newEmailNormalized).toBe(NEW_EMAIL);
+      expect(emailServiceMock.sendEmailChangeConfirmation).toHaveBeenCalledOnce();
+    });
+
+    it('persists only the SHA-256 hash of the token', async () => {
+      await service.requestEmailChange(CUSTOMER_ID, NEW_EMAIL, PASSWORD);
+      const call = lastUpsert();
+      expect(call.create.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(call.update.tokenHash).toMatch(/^[0-9a-f]{64}$/);
+      expect(call.update.usedAt).toBeNull();
+    });
+
+    it('rejects an incorrect current password without creating a request', async () => {
+      vi.mocked(bcrypt.compare).mockResolvedValue(false as never);
+
+      await expect(
+        service.requestEmailChange(CUSTOMER_ID, NEW_EMAIL, 'wrong'),
+      ).rejects.toThrow('La contraseña actual no es correcta.');
+      expect(prismaMock.emailChangeRequest.upsert).not.toHaveBeenCalled();
+      expect(emailServiceMock.sendEmailChangeConfirmation).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the new email equals the current one (case-insensitive)', async () => {
+      // EMAIL normalizes to the account's current emailNormalized.
+      await expect(
+        service.requestEmailChange(CUSTOMER_ID, EMAIL, PASSWORD),
+      ).rejects.toThrow('El nuevo correo debe ser diferente del actual.');
+      expect(prismaMock.emailChangeRequest.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejects when the new email is already in use', async () => {
+      prismaMock.customer.findUnique.mockImplementation(
+        (args: { where: { id?: string; emailNormalized?: string } }) =>
+          Promise.resolve(
+            args.where.id
+              ? registeredCustomerFixture()
+              : registeredCustomerFixture({ id: 'other', emailNormalized: NEW_EMAIL }),
+          ),
+      );
+
+      await expect(
+        service.requestEmailChange(CUSTOMER_ID, NEW_EMAIL, PASSWORD),
+      ).rejects.toThrow('Ese correo electrónico ya está en uso.');
+      expect(prismaMock.emailChangeRequest.upsert).not.toHaveBeenCalled();
+    });
+
+    it('rejects a guest / passwordless account', async () => {
+      prismaMock.customer.findUnique.mockImplementation(
+        (args: { where: { id?: string } }) =>
+          Promise.resolve(args.where.id ? registeredCustomerFixture({ passwordHash: null }) : null),
+      );
+
+      await expect(
+        service.requestEmailChange(CUSTOMER_ID, NEW_EMAIL, PASSWORD),
+      ).rejects.toThrow(UnauthorizedException);
+    });
+
+    it('a second request replaces the token (update arm clears usedAt)', async () => {
+      await service.requestEmailChange(CUSTOMER_ID, NEW_EMAIL, PASSWORD);
+      await service.requestEmailChange(CUSTOMER_ID, 'otro@example.com', PASSWORD);
+
+      expect(prismaMock.emailChangeRequest.upsert).toHaveBeenCalledTimes(2);
+      for (const [callArgs] of prismaMock.emailChangeRequest.upsert.mock.calls) {
+        expect((callArgs as { update: { usedAt: null } }).update.usedAt).toBeNull();
+      }
+    });
+
+    it('rolls back the pending request and throws 503 when the email cannot be sent', async () => {
+      emailServiceMock.sendEmailChangeConfirmation.mockRejectedValue(new Error('Resend down'));
+
+      await expect(
+        service.requestEmailChange(CUSTOMER_ID, NEW_EMAIL, PASSWORD),
+      ).rejects.toThrow(ServiceUnavailableException);
+
+      // The just-issued request is removed so no un-sendable pending change lingers.
+      expect(prismaMock.emailChangeRequest.deleteMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID },
+      });
+    });
+  });
+
+  // ─── cancelEmailChange ────────────────────────────────────────────────────────
+
+  describe('cancelEmailChange', () => {
+    it('deletes the pending request scoped to the authenticated user', async () => {
+      await service.cancelEmailChange(CUSTOMER_ID);
+
+      expect(prismaMock.emailChangeRequest.deleteMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID },
+      });
+    });
+
+    it('is idempotent when there is nothing to cancel', async () => {
+      prismaMock.emailChangeRequest.deleteMany.mockResolvedValue({ count: 0 });
+      await expect(service.cancelEmailChange(CUSTOMER_ID)).resolves.toBeUndefined();
+    });
+  });
+
+  // ─── confirmEmailChange ───────────────────────────────────────────────────────
+
+  describe('confirmEmailChange', () => {
+    const RAW_TOKEN = 'valid-raw-token-for-change';
+    const GENERIC =
+      'El enlace de cambio de correo no es válido, ha caducado o la dirección ya no está disponible.';
+    const NEW_EMAIL = 'Nuevo@Example.com';
+    const NEW_EMAIL_NORMALIZED = 'nuevo@example.com';
+
+    function validChangeRecord(overrides: Record<string, unknown> = {}) {
+      return {
+        id: 'ecr-1',
+        customerId: CUSTOMER_ID,
+        currentEmailNormalized: EMAIL_NORMALIZED,
+        newEmail: NEW_EMAIL,
+        newEmailNormalized: NEW_EMAIL_NORMALIZED,
+        tokenHash: 'will-be-computed',
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+        usedAt: null,
+        customer: {
+          id: CUSTOMER_ID,
+          email: EMAIL_TRIMMED,
+          emailNormalized: EMAIL_NORMALIZED,
+          passwordHash: PASSWORD_HASH,
+          registeredAt: new Date('2026-01-01T00:00:00Z'),
+        },
+        ...overrides,
+      };
+    }
+
+    beforeEach(() => {
+      // Availability re-check: target email free by default.
+      prismaMock.customer.findUnique.mockReset().mockResolvedValue(null);
+      prismaMock.emailChangeRequest.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+    });
+
+    it('switches the email, marks it verified, and consumes the token', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+
+      await service.confirmEmailChange(RAW_TOKEN);
+
+      const updateCall = prismaMock.customer.update.mock.calls[0][0] as {
+        where: { id: string };
+        data: { email: string; emailNormalized: string; emailVerifiedAt: Date };
+      };
+      expect(updateCall.where.id).toBe(CUSTOMER_ID);
+      expect(updateCall.data.email).toBe(NEW_EMAIL);
+      expect(updateCall.data.emailNormalized).toBe(NEW_EMAIL_NORMALIZED);
+      expect(updateCall.data.emailVerifiedAt).toBeInstanceOf(Date);
+
+      const consumeCall = prismaMock.emailChangeRequest.updateMany.mock.calls[0][0] as {
+        data: { usedAt: Date };
+      };
+      expect(consumeCall.data.usedAt).toBeInstanceOf(Date);
+    });
+
+    it('revokes all active sessions', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+
+      await service.confirmEmailChange(RAW_TOKEN);
+
+      expect(prismaMock.authSession.updateMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID, revokedAt: null },
+        data: { revokedAt: expect.any(Date) },
+      });
+    });
+
+    it('invalidates password-reset and email-verification tokens', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+
+      await service.confirmEmailChange(RAW_TOKEN);
+
+      expect(prismaMock.passwordResetToken.deleteMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID },
+      });
+      expect(prismaMock.emailVerificationToken.deleteMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID },
+      });
+    });
+
+    it('sends a best-effort notice to the OLD email after success', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+
+      await service.confirmEmailChange(RAW_TOKEN);
+
+      expect(emailServiceMock.sendEmailChangedNotice).toHaveBeenCalledWith({
+        customerId: CUSTOMER_ID,
+        oldEmail: EMAIL_TRIMMED,
+        newEmail: NEW_EMAIL,
+      });
+    });
+
+    it('does not revert the change if the notice fails', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+      emailServiceMock.sendEmailChangedNotice.mockRejectedValue(new Error('Resend down'));
+
+      await expect(service.confirmEmailChange(RAW_TOKEN)).resolves.toBeUndefined();
+      expect(prismaMock.customer.update).toHaveBeenCalledOnce();
+    });
+
+    it('throws the generic message for an unknown token and does not write', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(null);
+
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow(GENERIC);
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('throws generic for a used token', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(
+        validChangeRecord({ usedAt: new Date() }),
+      );
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow(GENERIC);
+    });
+
+    it('throws generic for an expired token', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(
+        validChangeRecord({ expiresAt: new Date(Date.now() - 1000) }),
+      );
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow(GENERIC);
+    });
+
+    it('throws generic when the current-email snapshot is stale', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(
+        validChangeRecord({
+          customer: {
+            id: CUSTOMER_ID,
+            email: 'changed@example.com',
+            emailNormalized: 'changed@example.com',
+            passwordHash: PASSWORD_HASH,
+            registeredAt: new Date('2026-01-01T00:00:00Z'),
+          },
+        }),
+      );
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow(GENERIC);
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('throws generic when the target email is now taken', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+      prismaMock.customer.findUnique.mockResolvedValue(
+        registeredCustomerFixture({ id: 'other', emailNormalized: NEW_EMAIL_NORMALIZED }),
+      );
+
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow(GENERIC);
+      expect(prismaMock.customer.update).not.toHaveBeenCalled();
+    });
+
+    it('concurrent confirm: second updateMany count 0 → generic', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+      prismaMock.emailChangeRequest.updateMany
+        .mockResolvedValueOnce({ count: 1 })
+        .mockResolvedValueOnce({ count: 0 });
+
+      await service.confirmEmailChange(RAW_TOKEN); // first wins
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow(GENERIC);
+    });
+
+    it('maps a P2002 unique-constraint race to the generic message', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+      prismaMock.customer.update.mockRejectedValue({ code: 'P2002' });
+
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow(GENERIC);
+    });
+
+    it('propagates a non-unique DB error (full rollback, not masked)', async () => {
+      prismaMock.emailChangeRequest.findUnique.mockResolvedValue(validChangeRecord());
+      prismaMock.customer.update.mockRejectedValue(new Error('DB error'));
+
+      await expect(service.confirmEmailChange(RAW_TOKEN)).rejects.toThrow('DB error');
+    });
+  });
+
+  // ─── resetPassword also cancels a pending email change ──────────────────────────
+
+  describe('resetPassword — cancels pending email change', () => {
+    it('deletes any EmailChangeRequest inside the reset transaction', async () => {
+      prismaMock.passwordResetToken.findUnique.mockResolvedValue({
+        id: 'prt-1',
+        customerId: CUSTOMER_ID,
+        tokenHash: 'computed',
+        expiresAt: new Date(Date.now() + 30 * 60 * 1000),
+        usedAt: null,
+        customer: {
+          id: CUSTOMER_ID,
+          passwordHash: PASSWORD_HASH,
+          registeredAt: new Date('2026-01-01T00:00:00Z'),
+        },
+      });
+      prismaMock.passwordResetToken.updateMany.mockResolvedValue({ count: 1 });
+      prismaMock.customer.update.mockResolvedValue({});
+
+      await service.resetPassword('raw-reset-token', 'newpassword456');
+
+      expect(prismaMock.emailChangeRequest.deleteMany).toHaveBeenCalledWith({
+        where: { customerId: CUSTOMER_ID },
+      });
     });
   });
 });
