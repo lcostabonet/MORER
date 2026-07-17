@@ -64,6 +64,12 @@ enum EmailSubscriptionStatus {
   BOUNCED
 }
 
+enum CustomerAddressType {
+  SHIPPING
+  BILLING
+  BOTH
+}
+
 // ─── Models ───────────────────────────────────────────────────────────────────
 
 // Stock no se guarda en Product ni en ProductVariant.
@@ -139,6 +145,7 @@ model Customer {
   passwordResetToken     PasswordResetToken?
   emailVerificationToken EmailVerificationToken?
   emailChangeRequest     EmailChangeRequest?
+  addresses              CustomerAddress[]
 
   @@map("customers")
 }
@@ -347,4 +354,32 @@ model EmailChangeRequest {
   @@index([newEmailNormalized])
   @@index([expiresAt])
   @@map("email_change_requests")
+}
+
+// NOTE: no @@map — the table is named "CustomerAddress" (matching the partial
+// unique indexes added in the migration). "At most one default shipping and one
+// default billing per customer" is enforced by two PARTIAL UNIQUE indexes that
+// Prisma 5.22 cannot express declaratively; they live in the migration SQL and
+// act as a DB-level backstop alongside the service transactions.
+model CustomerAddress {
+  id                String              @id @default(cuid())
+  customerId        String
+  fullName          String
+  phone             String?
+  line1             String
+  line2             String?
+  postalCode        String
+  city              String
+  province          String
+  countryCode       String              @default("ES")
+  type              CustomerAddressType
+  isDefaultShipping Boolean             @default(false)
+  isDefaultBilling  Boolean             @default(false)
+  createdAt         DateTime            @default(now())
+  updatedAt         DateTime            @updatedAt
+
+  customer Customer @relation(fields: [customerId], references: [id], onDelete: Cascade)
+
+  @@index([customerId])
+  @@index([customerId, type])
 }

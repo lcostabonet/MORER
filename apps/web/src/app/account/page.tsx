@@ -3,9 +3,11 @@ import { cookies } from 'next/headers';
 import { redirect } from 'next/navigation';
 import Link from 'next/link';
 import { getCurrentUser } from '@/lib/auth';
+import { getAddresses } from '@/lib/addresses';
 import { LogoutButton } from './_components/LogoutButton';
 import { ProfileCard } from './_components/ProfileCard';
 import { PasswordChangeSection } from './_components/PasswordChangeSection';
+import { AddressBook } from './_components/AddressBook';
 import { LogoutAllButton } from '@/components/logout-all-button';
 
 export const metadata: Metadata = {
@@ -20,6 +22,8 @@ export default async function AccountPage() {
   if (!user) {
     redirect('/login?next=/account');
   }
+
+  const addresses = await getAddresses(cookieStore);
 
   return (
     <div className="max-w-2xl mx-auto px-4 sm:px-6 py-24">
@@ -47,6 +51,9 @@ export default async function AccountPage() {
 
       {/* Password change — separate security section */}
       <PasswordChangeSection />
+
+      {/* Address book */}
+      <AddressBook addresses={addresses} />
 
       {/* Quick links */}
       <div className="space-y-3">

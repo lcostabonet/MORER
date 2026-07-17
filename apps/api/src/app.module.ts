@@ -3,6 +3,7 @@ import { ThrottlerModule } from '@nestjs/throttler';
 import { AuthModule } from './auth';
 import { CartModule } from './cart';
 import { CheckoutModule } from './checkout';
+import { CustomersModule } from './customers/customers.module';
 import { FulfillmentModule } from './fulfillment';
 import { HealthModule } from './health';
 import { PaymentsModule } from './payments';
@@ -18,6 +19,7 @@ import { ProductsModule } from './products';
     PaymentsModule,
     FulfillmentModule,
     AuthModule,
+    CustomersModule,
   ],
 })
 export class AppModule {}
