@@ -22,3 +22,26 @@ export interface OrderResponse {
 export interface OrderLookupResponse {
   orderId: string;
 }
+
+// Public address projection used by the checkout selection UI.
+export interface CheckoutAddress {
+  id: string;
+  fullName: string;
+  phone: string | null;
+  line1: string;
+  line2: string | null;
+  postalCode: string;
+  city: string;
+  province: string;
+  countryCode: string;
+  type: 'SHIPPING' | 'BILLING' | 'BOTH';
+  isDefaultShipping: boolean;
+  isDefaultBilling: boolean;
+}
+
+export interface CustomerCheckoutState {
+  shippingAddresses: CheckoutAddress[];
+  billingAddresses: CheckoutAddress[];
+  defaultShippingId: string | null;
+  defaultBillingId: string | null;
+}

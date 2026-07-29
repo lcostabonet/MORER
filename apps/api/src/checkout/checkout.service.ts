@@ -4,10 +4,16 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
-import { CartStatus, OrderStatus, Prisma, ProductStatus } from '@morer/database';
+import { CartStatus, CustomerAddressType, OrderStatus, Prisma, ProductStatus } from '@morer/database';
 import { PrismaService } from '../database/prisma.service';
-import type { OrderLookupResponse, OrderResponse } from './checkout.types';
+import type {
+  CheckoutAddress,
+  CustomerCheckoutState,
+  OrderLookupResponse,
+  OrderResponse,
+} from './checkout.types';
 import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.dto';
+import type { CustomerCheckoutDto } from './dto/customer-checkout.dto';
 import type { LookupOrderDto } from './dto/lookup-order.dto';
 
 // ─── Design notes ─────────────────────────────────────────────────────────────
@@ -127,6 +133,66 @@ const CART_INCLUDE = {
 
 const ORDER_INCLUDE = { items: true } as const;
 
+// ─── Phase 11E-alpha: authenticated checkout from saved addresses ─────────────
+
+const ONLY_SPAIN = 'Por ahora solo se admiten direcciones de España.';
+const INVALID_SHIPPING = 'La dirección de envío seleccionada no es válida.';
+const INVALID_BILLING = 'La dirección de facturación seleccionada no es válida.';
+const SHIPPING_NOT_BILLING_USE =
+  'La dirección de envío seleccionada no puede usarse también para facturación.';
+
+// Public projection for the selection UI (never exposes customerId/timestamps).
+const CHECKOUT_ADDRESS_SELECT = {
+  id: true,
+  fullName: true,
+  phone: true,
+  line1: true,
+  line2: true,
+  postalCode: true,
+  city: true,
+  province: true,
+  countryCode: true,
+  type: true,
+  isDefaultShipping: true,
+  isDefaultBilling: true,
+} satisfies Prisma.CustomerAddressSelect;
+
+// Full address fields the service reads to validate + snapshot.
+type OwnedAddress = {
+  id: string;
+  fullName: string;
+  phone: string | null;
+  line1: string;
+  line2: string | null;
+  postalCode: string;
+  city: string;
+  province: string;
+  countryCode: string;
+  type: CustomerAddressType;
+};
+
+function canBeShipping(type: CustomerAddressType): boolean {
+  return type === CustomerAddressType.SHIPPING || type === CustomerAddressType.BOTH;
+}
+function canBeBilling(type: CustomerAddressType): boolean {
+  return type === CustomerAddressType.BILLING || type === CustomerAddressType.BOTH;
+}
+
+// Fixed JSON copy of an address at order time — remains valid even if the source
+// address is later edited or deleted.
+function snapshotAddress(a: OwnedAddress): Prisma.InputJsonValue {
+  return {
+    fullName: a.fullName,
+    phone: a.phone ?? null,
+    line1: a.line1,
+    line2: a.line2 ?? null,
+    postalCode: a.postalCode,
+    city: a.city,
+    province: a.province,
+    countryCode: a.countryCode,
+  };
+}
+
 @Injectable()
 export class CheckoutService {
   constructor(private readonly prisma: PrismaService) {}
@@ -137,106 +203,139 @@ export class CheckoutService {
     assertUuid(dto.cartId, 'cartId');
     assertEmail(dto.email);
 
+    const order = await this.runWithOrderNumberRetry(() =>
+      this.prisma.$transaction(
+        (tx) =>
+          this.reserveStockAndCreateOrder(tx, {
+            cartId: dto.cartId,
+            email: dto.email.trim().toLowerCase(),
+            // Guest flow: create/resolve the anonymous guest Customer inside the tx
+            // AFTER cart validation + stock reservation (unchanged behaviour).
+            resolveCustomerId: async (t) => {
+              const guestEmail = `anon-${dto.cartId}@morer-checkout.local`;
+              const guest = await t.customer.upsert({
+                where: { emailNormalized: guestEmail },
+                update: {},
+                create: { email: guestEmail, emailNormalized: guestEmail },
+              });
+              return guest.id;
+            },
+          }),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    );
+
+    return this.mapOrder(order);
+  }
+
+  // ─── Authenticated checkout from saved addresses (Phase 11E-alpha) ────────────
+
+  /**
+   * Returns the authenticated customer's shipping-/billing-compatible addresses
+   * and which are default, for the checkout selection UI. No customerId or
+   * internal timestamps are exposed.
+   */
+  async getCustomerCheckout(customerId: string): Promise<CustomerCheckoutState> {
+    const addresses = (await this.prisma.customerAddress.findMany({
+      where: { customerId },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      select: CHECKOUT_ADDRESS_SELECT,
+    })) as CheckoutAddress[];
+
+    const shippingAddresses = addresses.filter((a) => canBeShipping(a.type as CustomerAddressType));
+    const billingAddresses = addresses.filter((a) => canBeBilling(a.type as CustomerAddressType));
+
+    return {
+      shippingAddresses,
+      billingAddresses,
+      defaultShippingId: shippingAddresses.find((a) => a.isDefaultShipping)?.id ?? null,
+      defaultBillingId: billingAddresses.find((a) => a.isDefaultBilling)?.id ?? null,
+    };
+  }
+
+  /**
+   * Creates an order for a registered customer using their saved addresses.
+   * customerId comes ONLY from the JWT. Both addresses are validated as owned,
+   * Spanish, and compatible, then snapshotted onto the order (immutable copies).
+   * Reuses the guest checkout's cart-validation / stock-reservation core.
+   */
+  async startCustomerCheckout(
+    customerId: string,
+    email: string,
+    dto: CustomerCheckoutDto,
+  ): Promise<OrderResponse> {
+    assertUuid(dto.cartId, 'cartId');
+
+    const shipping = await this.resolveOwnedAddress(customerId, dto.shippingAddressId);
+    if (!shipping) throw new BadRequestException(INVALID_SHIPPING);
+    if (shipping.countryCode !== 'ES') throw new BadRequestException(ONLY_SPAIN);
+    if (!canBeShipping(shipping.type)) throw new BadRequestException(INVALID_SHIPPING);
+
+    let billing: OwnedAddress;
+    if (dto.useShippingAsBilling === true) {
+      // Reusing the shipping address for billing requires it to be billing-capable.
+      if (!canBeBilling(shipping.type)) {
+        throw new BadRequestException(SHIPPING_NOT_BILLING_USE);
+      }
+      billing = shipping;
+    } else {
+      if (!dto.billingAddressId) throw new BadRequestException(INVALID_BILLING);
+      const resolved = await this.resolveOwnedAddress(customerId, dto.billingAddressId);
+      if (!resolved) throw new BadRequestException(INVALID_BILLING);
+      if (resolved.countryCode !== 'ES') throw new BadRequestException(ONLY_SPAIN);
+      if (!canBeBilling(resolved.type)) throw new BadRequestException(INVALID_BILLING);
+      billing = resolved;
+    }
+
+    const shippingAddressSnapshot = snapshotAddress(shipping);
+    const billingAddressSnapshot = snapshotAddress(billing);
+
+    const order = await this.runWithOrderNumberRetry(() =>
+      this.prisma.$transaction(
+        (tx) =>
+          this.reserveStockAndCreateOrder(tx, {
+            cartId: dto.cartId,
+            email: email.trim().toLowerCase(),
+            resolveCustomerId: async () => customerId,
+            shippingAddressSnapshot,
+            billingAddressSnapshot,
+          }),
+        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+      ),
+    );
+
+    return this.mapOrder(order);
+  }
+
+  private async resolveOwnedAddress(
+    customerId: string,
+    addressId: string,
+  ): Promise<OwnedAddress | null> {
+    return this.prisma.customerAddress.findFirst({
+      where: { id: addressId, customerId },
+      select: {
+        id: true,
+        fullName: true,
+        phone: true,
+        line1: true,
+        line2: true,
+        postalCode: true,
+        city: true,
+        province: true,
+        countryCode: true,
+        type: true,
+      },
+    });
+  }
+
+  // ─── Shared checkout core ─────────────────────────────────────────────────────
+
+  // Runs a checkout operation with retry on order-number collisions, mapping
+  // Prisma serialization / collision errors to safe ConflictExceptions.
+  private async runWithOrderNumberRetry<T>(operation: () => Promise<T>): Promise<T> {
     for (let attempt = 1; attempt <= MAX_ORDER_NUMBER_RETRIES; attempt++) {
       try {
-        const order = await this.prisma.$transaction(
-          async (tx) => {
-            // 1. Fetch and validate cart inside transaction.
-            const cart = await tx.cart.findUnique({
-              where: { id: dto.cartId },
-              include: CART_INCLUDE,
-            });
-
-            if (!cart) throw new NotFoundException('Cart not found');
-            if (cart.status !== CartStatus.ACTIVE) {
-              throw new BadRequestException(
-                'Cart is not active. It may have been converted or expired.',
-              );
-            }
-            if (cart.items.length === 0) {
-              throw new BadRequestException('Cart is empty');
-            }
-
-            // 2. Validate each item and reserve stock.
-            let totalInCents = 0;
-
-            for (const item of cart.items as CartItemWithVariant[]) {
-              const { variant } = item;
-
-              if (variant.status !== ProductStatus.ACTIVE || variant.deletedAt !== null) {
-                throw new BadRequestException(
-                  `Variant "${variant.size}" is no longer available`,
-                );
-              }
-              if (variant.product.status !== ProductStatus.ACTIVE) {
-                throw new BadRequestException(
-                  `Product "${variant.product.name}" is no longer available`,
-                );
-              }
-
-              const stock = variant.inventory?.stockQuantity ?? 0;
-              const reserved = variant.inventory?.reservedQuantity ?? 0;
-              const available = Math.max(0, stock - reserved);
-
-              if (item.quantity > available) {
-                throw new BadRequestException(
-                  `Insufficient stock for "${variant.product.name}" (${variant.size}). ` +
-                    `Available: ${available}, requested: ${item.quantity}`,
-                );
-              }
-
-              // Reserve stock — only reservedQuantity, never stockQuantity.
-              await tx.inventory.update({
-                where: { variantId: item.variantId },
-                data: { reservedQuantity: { increment: item.quantity } },
-              });
-
-              totalInCents += item.priceInCents * item.quantity;
-            }
-
-            // 3. Create anonymous guest Customer (Phase 8 will capture real data).
-            const guestEmail = `anon-${dto.cartId}@morer-checkout.local`;
-            const customer = await tx.customer.upsert({
-              where: { emailNormalized: guestEmail },
-              update: {},
-              create: { email: guestEmail, emailNormalized: guestEmail },
-            });
-
-            // 4. Create Order with snapshot of each item.
-            const newOrder = await tx.order.create({
-              data: {
-                orderNumber: generateOrderNumber(),
-                customerId: customer.id,
-                status: OrderStatus.PENDING_PAYMENT,
-                totalInCents,
-                shippingInCents: 0, // calculated at payment (Fase 8)
-                taxInCents: 0,      // calculated at payment (Fase 8)
-                email: dto.email.trim().toLowerCase(),
-                items: {
-                  create: (cart.items as CartItemWithVariant[]).map((item) => ({
-                    variantId: item.variantId,
-                    productName: item.variant.product.name,
-                    variantSize: item.variant.size,
-                    quantity: item.quantity,
-                    priceInCents: item.priceInCents, // snapshot from cart, set by backend
-                  })),
-                },
-              },
-              include: ORDER_INCLUDE,
-            });
-
-            // 5. Mark cart as CONVERTED — prevents re-checkout.
-            await tx.cart.update({
-              where: { id: dto.cartId },
-              data: { status: CartStatus.CONVERTED },
-            });
-
-            return newOrder;
-          },
-          { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
-        );
-
-        return this.mapOrder(order as unknown as RawOrder);
+        return await operation();
       } catch (err) {
         if (
           err instanceof BadRequestException ||
@@ -259,9 +358,108 @@ export class CheckoutService {
         throw err;
       }
     }
-
     // Unreachable — the loop always returns or throws before exhausting retries.
     throw new ConflictException('Checkout could not be completed. Please try again.');
+  }
+
+  // Cart validation + stock reservation + order creation + cart conversion,
+  // shared by the guest and authenticated flows. Order of operations (validate →
+  // reserve → resolve customer → create order → convert cart) is preserved.
+  private async reserveStockAndCreateOrder(
+    tx: Prisma.TransactionClient,
+    opts: {
+      cartId: string;
+      email: string;
+      resolveCustomerId: (tx: Prisma.TransactionClient) => Promise<string>;
+      shippingAddressSnapshot?: Prisma.InputJsonValue;
+      billingAddressSnapshot?: Prisma.InputJsonValue;
+    },
+  ): Promise<RawOrder> {
+    const cart = await tx.cart.findUnique({
+      where: { id: opts.cartId },
+      include: CART_INCLUDE,
+    });
+
+    if (!cart) throw new NotFoundException('Cart not found');
+    if (cart.status !== CartStatus.ACTIVE) {
+      throw new BadRequestException(
+        'Cart is not active. It may have been converted or expired.',
+      );
+    }
+    if (cart.items.length === 0) {
+      throw new BadRequestException('Cart is empty');
+    }
+
+    let totalInCents = 0;
+    for (const item of cart.items as CartItemWithVariant[]) {
+      const { variant } = item;
+
+      if (variant.status !== ProductStatus.ACTIVE || variant.deletedAt !== null) {
+        throw new BadRequestException(`Variant "${variant.size}" is no longer available`);
+      }
+      if (variant.product.status !== ProductStatus.ACTIVE) {
+        throw new BadRequestException(
+          `Product "${variant.product.name}" is no longer available`,
+        );
+      }
+
+      const stock = variant.inventory?.stockQuantity ?? 0;
+      const reserved = variant.inventory?.reservedQuantity ?? 0;
+      const available = Math.max(0, stock - reserved);
+
+      if (item.quantity > available) {
+        throw new BadRequestException(
+          `Insufficient stock for "${variant.product.name}" (${variant.size}). ` +
+            `Available: ${available}, requested: ${item.quantity}`,
+        );
+      }
+
+      // Reserve stock — only reservedQuantity, never stockQuantity.
+      await tx.inventory.update({
+        where: { variantId: item.variantId },
+        data: { reservedQuantity: { increment: item.quantity } },
+      });
+
+      totalInCents += item.priceInCents * item.quantity;
+    }
+
+    const customerId = await opts.resolveCustomerId(tx);
+
+    const newOrder = await tx.order.create({
+      data: {
+        orderNumber: generateOrderNumber(),
+        customerId,
+        status: OrderStatus.PENDING_PAYMENT,
+        totalInCents,
+        shippingInCents: 0, // calculated at payment (Fase 8)
+        taxInCents: 0, // calculated at payment (Fase 8)
+        email: opts.email,
+        ...(opts.shippingAddressSnapshot !== undefined
+          ? { shippingAddressSnapshot: opts.shippingAddressSnapshot }
+          : {}),
+        ...(opts.billingAddressSnapshot !== undefined
+          ? { billingAddressSnapshot: opts.billingAddressSnapshot }
+          : {}),
+        items: {
+          create: (cart.items as CartItemWithVariant[]).map((item) => ({
+            variantId: item.variantId,
+            productName: item.variant.product.name,
+            variantSize: item.variant.size,
+            quantity: item.quantity,
+            priceInCents: item.priceInCents, // snapshot from cart, set by backend
+          })),
+        },
+      },
+      include: ORDER_INCLUDE,
+    });
+
+    // Mark cart as CONVERTED — prevents re-checkout.
+    await tx.cart.update({
+      where: { id: opts.cartId },
+      data: { status: CartStatus.CONVERTED },
+    });
+
+    return newOrder as unknown as RawOrder;
   }
 
   // ─── Find order ────────────────────────────────────────────────────────────

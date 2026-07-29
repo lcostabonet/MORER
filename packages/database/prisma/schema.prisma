@@ -190,6 +190,11 @@ model Order {
   shippingInCents Int         @default(0)
   taxInCents      Int         @default(0)
   shippingAddress Json?
+  // Phase 11E-alpha: fixed snapshots of the chosen saved addresses at order time.
+  // Legacy `shippingAddress` above is intentionally left untouched (not read/written
+  // by the authenticated saved-address flow).
+  shippingAddressSnapshot Json?
+  billingAddressSnapshot  Json?
   email                   String?
   confirmationEmailSentAt DateTime?
   trackingNumber          String?
