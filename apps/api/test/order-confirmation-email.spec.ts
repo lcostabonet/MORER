@@ -71,4 +71,58 @@ describe('renderOrderConfirmation template', () => {
     // The <Preview> component renders as a hidden span inside the HTML.
     expect(html).toContain('MORER-PRV-003');
   });
+
+  // ─── Phase 11E-beta: address snapshots in the confirmation email ────────────
+
+  it('renders shipping and billing address snapshots (España, phone, no raw JSON)', async () => {
+    const html = await renderOrderConfirmation({
+      orderNumber: 'MORER-ADDR-004',
+      items: [{ productName: 'Camiseta', variantSize: 'M', quantity: 1, priceInCents: 2999 }],
+      totalInCents: 2999,
+      currency: 'EUR',
+      shippingAddress: {
+        fullName: 'Lluís Costa',
+        phone: '+34612345678',
+        line1: 'Carrer Mallorca 123',
+        line2: '2º 1ª',
+        postalCode: '08036',
+        city: 'Barcelona',
+        province: 'Barcelona',
+        countryCode: 'ES',
+      },
+      billingAddress: {
+        fullName: 'Lluís Costa Empresa',
+        phone: null,
+        line1: 'Gran Via 1',
+        line2: null,
+        postalCode: '08014',
+        city: 'Barcelona',
+        province: 'Barcelona',
+        countryCode: 'ES',
+      },
+    });
+
+    expect(html).toContain('Dirección de envío');
+    expect(html).toContain('Dirección de facturación');
+    expect(html).toContain('Carrer Mallorca 123');
+    expect(html).toContain('Gran Via 1');
+    expect(html).toContain('España');
+    expect(html).toContain('+34612345678');
+    expect(html).not.toContain('[object Object]');
+    expect(html).not.toContain('undefined');
+  });
+
+  it('shows a neutral fallback when snapshots are absent (legacy order)', async () => {
+    const html = await renderOrderConfirmation({
+      orderNumber: 'MORER-ADDR-005',
+      items: [],
+      totalInCents: 0,
+      currency: 'EUR',
+      shippingAddress: null,
+      billingAddress: null,
+    });
+
+    expect(html).toContain('Dirección no disponible para este pedido.');
+    expect(html).not.toContain('undefined');
+  });
 });

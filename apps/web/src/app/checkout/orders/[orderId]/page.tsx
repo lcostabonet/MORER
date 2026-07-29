@@ -7,6 +7,7 @@ import { Price } from '@/components/price';
 import { CancelOrderButton } from '@/components/cancel-order-button';
 import { PaymentForm } from '@/components/payment-form';
 import { AutoRefresh } from '@/components/auto-refresh';
+import { OrderAddressBlock } from './_components/OrderAddressBlock';
 
 async function fetchOrder(orderId: string): Promise<OrderResponse> {
   const res = await fetch(`${API_URL}/checkout/orders/${orderId}`, {
@@ -165,6 +166,12 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
                 </div>
               </div>
             ))}
+          </div>
+
+          {/* Shipping & billing address snapshots (Phase 11E-beta) */}
+          <div className="pt-10 mt-2 border-t border-stone-100 grid grid-cols-1 sm:grid-cols-2 gap-8">
+            <OrderAddressBlock title="Dirección de envío" address={order.shippingAddress} />
+            <OrderAddressBlock title="Dirección de facturación" address={order.billingAddress} />
           </div>
 
           {/* PENDING — payment form (only when not returning from 3D Secure) */}

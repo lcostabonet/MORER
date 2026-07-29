@@ -15,6 +15,7 @@ import type {
 import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.dto';
 import type { CustomerCheckoutDto } from './dto/customer-checkout.dto';
 import type { LookupOrderDto } from './dto/lookup-order.dto';
+import { normalizeOrderAddressSnapshot } from './order-address-snapshot';
 
 // ─── Design notes ─────────────────────────────────────────────────────────────
 //
@@ -107,6 +108,10 @@ type RawOrder = {
   totalInCents: number;
   shippingInCents: number;
   taxInCents: number;
+  // Raw JSON snapshots as stored on the Order. Normalized before leaving the API.
+  // The legacy `shippingAddress` column is intentionally NOT read here.
+  shippingAddressSnapshot?: Prisma.JsonValue | null;
+  billingAddressSnapshot?: Prisma.JsonValue | null;
   createdAt: Date;
   items: {
     id: string;
@@ -582,6 +587,10 @@ export class CheckoutService {
         unitPriceInCents: item.priceInCents,
         lineTotalInCents: item.priceInCents * item.quantity,
       })),
+      // Normalized immutable snapshots — decoupled from the live CustomerAddress
+      // and never read from the legacy `shippingAddress` column.
+      shippingAddress: normalizeOrderAddressSnapshot(order.shippingAddressSnapshot),
+      billingAddress: normalizeOrderAddressSnapshot(order.billingAddressSnapshot),
       createdAt: order.createdAt,
     };
   }

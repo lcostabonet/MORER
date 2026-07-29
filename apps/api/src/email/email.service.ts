@@ -3,6 +3,7 @@ import { OrderStatus } from '@morer/database';
 import { Resend } from 'resend';
 import { renderConfirmEmailChange, renderEmailChangedNotice, renderOrderConfirmation, renderPasswordChangedNotice, renderPasswordReset, renderShippingConfirmation, renderVerifyEmail, renderWelcome } from '@morer/emails';
 import { PrismaService } from '../database/prisma.service';
+import { normalizeOrderAddressSnapshot } from '../checkout/order-address-snapshot';
 
 const CURRENCY = 'EUR';
 
@@ -14,6 +15,9 @@ type OrderWithItems = {
   email: string | null;
   totalInCents: number;
   confirmationEmailSentAt: Date | null;
+  // Immutable address snapshots taken at order time (Phase 11E). Null for legacy orders.
+  shippingAddressSnapshot: unknown;
+  billingAddressSnapshot: unknown;
   items: Array<{
     productName: string;
     variantSize: string;
@@ -116,6 +120,10 @@ export class EmailService {
         })),
         totalInCents: order.totalInCents,
         currency: CURRENCY,
+        // Immutable snapshots from the order (Phase 11E-beta). Null → neutral
+        // fallback rendered by the template. Never the live CustomerAddress.
+        shippingAddress: normalizeOrderAddressSnapshot(order.shippingAddressSnapshot),
+        billingAddress: normalizeOrderAddressSnapshot(order.billingAddressSnapshot),
       });
 
       const { error } = await this.resend.emails.send({

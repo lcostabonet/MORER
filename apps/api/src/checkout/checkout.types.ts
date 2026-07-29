@@ -1,3 +1,7 @@
+import type { OrderAddressSnapshot } from './order-address-snapshot';
+
+export type { OrderAddressSnapshot } from './order-address-snapshot';
+
 export interface OrderItemResponse {
   id: string;
   productName: string;
@@ -16,6 +20,11 @@ export interface OrderResponse {
   taxInCents: number;
   currency: string;
   items: OrderItemResponse[];
+  // Immutable address snapshots taken at order time (Phase 11E). Null for legacy
+  // orders created before snapshots existed. Never sourced from the live
+  // CustomerAddress nor from the legacy `shippingAddress` column.
+  shippingAddress: OrderAddressSnapshot | null;
+  billingAddress: OrderAddressSnapshot | null;
   createdAt: Date;
 }
 

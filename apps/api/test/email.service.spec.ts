@@ -1,5 +1,6 @@
 /// <reference types="node" />
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { renderOrderConfirmation } from '@morer/emails';
 import { EmailService } from '../src/email/email.service';
 import { asPrismaService, createPrismaMock } from './helpers/prisma-mock';
 import type { PrismaMock } from './helpers/prisma-mock';
@@ -104,6 +105,49 @@ describe('EmailService.sendOrderConfirmationIfNeeded (Phase 10A)', () => {
     expect(mockSend).toHaveBeenCalledWith(
       expect.objectContaining({ to: CUSTOMER_EMAIL }),
     );
+  });
+
+  // Phase 11E-beta: order snapshots are forwarded (normalized) to the template.
+  it('passes the normalized address snapshots to the confirmation template', async () => {
+    mock.order.findUnique.mockResolvedValue(
+      paidOrderFixture({
+        shippingAddressSnapshot: {
+          fullName: 'Lluís Costa',
+          phone: '+34612345678',
+          line1: 'Carrer Mallorca 123',
+          line2: '2º 1ª',
+          postalCode: '08036',
+          city: 'Barcelona',
+          province: 'Barcelona',
+          countryCode: 'ES',
+          // Extra internal fields must be stripped before reaching the template.
+          addressId: 'addr-secret',
+          customerId: 'customer-secret',
+        },
+        billingAddressSnapshot: null,
+      }),
+    );
+
+    await service.sendOrderConfirmationIfNeeded(ORDER_ID);
+
+    expect(renderOrderConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        shippingAddress: {
+          fullName: 'Lluís Costa',
+          phone: '+34612345678',
+          line1: 'Carrer Mallorca 123',
+          line2: '2º 1ª',
+          postalCode: '08036',
+          city: 'Barcelona',
+          province: 'Barcelona',
+          countryCode: 'ES',
+        },
+        billingAddress: null,
+      }),
+    );
+    const arg = vi.mocked(renderOrderConfirmation).mock.calls[0][0];
+    expect(arg.shippingAddress).not.toHaveProperty('addressId');
+    expect(arg.shippingAddress).not.toHaveProperty('customerId');
   });
 
   it('marks confirmationEmailSentAt after the provider accepts the email', async () => {

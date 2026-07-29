@@ -11,6 +11,19 @@ import {
 } from '@react-email/components';
 import * as React from 'react';
 
+// Immutable address snapshot taken at order time (Phase 11E). Kept in sync with
+// the API's OrderAddressSnapshot shape; this package cannot import from apps/api.
+export interface OrderConfirmationAddress {
+  fullName: string;
+  phone: string | null;
+  line1: string;
+  line2: string | null;
+  postalCode: string;
+  city: string;
+  province: string;
+  countryCode: string;
+}
+
 export interface OrderConfirmationData {
   orderNumber: string;
   items: Array<{
@@ -21,6 +34,59 @@ export interface OrderConfirmationData {
   }>;
   totalInCents: number;
   currency: string;
+  // Optional so existing callers/tests keep working. Null → neutral fallback.
+  shippingAddress?: OrderConfirmationAddress | null;
+  billingAddress?: OrderConfirmationAddress | null;
+}
+
+const ADDRESS_UNAVAILABLE = 'Dirección no disponible para este pedido.';
+
+// Postal formatting shared with the web helper (kept intentionally simple/local).
+function formatAddressLines(address: OrderConfirmationAddress): string[] {
+  const country = address.countryCode === 'ES' ? 'España' : address.countryCode;
+  return [
+    address.fullName,
+    address.line1,
+    address.line2,
+    `${address.postalCode} ${address.city}, ${address.province}`,
+    country,
+    address.phone,
+  ].filter((line): line is string => typeof line === 'string' && line.trim() !== '');
+}
+
+function AddressBlock({
+  title,
+  address,
+}: {
+  title: string;
+  address: OrderConfirmationAddress | null | undefined;
+}) {
+  return (
+    <Section style={{ marginBottom: '16px' }}>
+      <Heading
+        as="h3"
+        style={{
+          fontSize: '11px',
+          fontWeight: '600',
+          textTransform: 'uppercase',
+          letterSpacing: '0.08em',
+          color: '#6b7280',
+          margin: '0 0 8px',
+        }}
+      >
+        {title}
+      </Heading>
+      {address ? (
+        formatAddressLines(address).map((line, index) => (
+          <Text key={index} style={{ margin: '0 0 2px', fontSize: '13px', color: '#374151' }}>
+            {line}
+          </Text>
+        ))
+      ) : (
+        <Text style={{ margin: 0, fontSize: '13px', color: '#9ca3af' }}>{ADDRESS_UNAVAILABLE}</Text>
+      )}
+    </Section>
+  );
 }
 
 function formatPrice(cents: number, currency: string): string {
@@ -52,6 +118,8 @@ export function OrderConfirmationEmail({
   items,
   totalInCents,
   currency,
+  shippingAddress,
+  billingAddress,
 }: OrderConfirmationData) {
   return (
     <Html lang="es">
@@ -113,6 +181,11 @@ export function OrderConfirmationEmail({
           </Text>
 
           <Hr style={{ borderColor: '#e5e7eb', margin: '24px 0 16px' }} />
+
+          <AddressBlock title="Dirección de envío" address={shippingAddress} />
+          <AddressBlock title="Dirección de facturación" address={billingAddress} />
+
+          <Hr style={{ borderColor: '#e5e7eb', margin: '16px 0' }} />
 
           <Text style={{ fontSize: '12px', color: '#9ca3af', margin: 0 }}>
             Si tienes alguna pregunta sobre tu pedido, puedes consultarlo en morer.com.
