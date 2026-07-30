@@ -49,12 +49,27 @@ function billAddr(over: Record<string, unknown> = {}) {
   };
 }
 
+const STANDARD = { code: 'STANDARD', name: 'Envío estándar', description: '3-5 días laborables', priceInCents: 495 };
+const EXPRESS = { code: 'EXPRESS', name: 'Envío express', description: '1-2 días laborables', priceInCents: 895 };
+
+function shippingFields(over: Record<string, unknown> = {}) {
+  return {
+    shippingMethods: [STANDARD, EXPRESS],
+    defaultShippingMethodCode: 'STANDARD',
+    subtotalInCents: 5500,
+    taxInCents: 0,
+    totalInCents: 5995,
+    ...over,
+  };
+}
+
 function checkoutState(over: Record<string, unknown> = {}) {
   return {
     shippingAddresses: [shipAddr()],
     billingAddresses: [billAddr()],
     defaultShippingId: 'ship-1',
     defaultBillingId: 'bill-1',
+    ...shippingFields(),
     ...over,
   };
 }
@@ -94,7 +109,13 @@ describe('CheckoutClient', () => {
   it('shows a link to /account when there are no shipping addresses', async () => {
     mockGetCart.mockResolvedValue(CART);
     vi.mocked(fetch).mockResolvedValueOnce(
-      res(200, { shippingAddresses: [], billingAddresses: [], defaultShippingId: null, defaultBillingId: null }),
+      res(200, {
+        shippingAddresses: [],
+        billingAddresses: [],
+        defaultShippingId: null,
+        defaultBillingId: null,
+        ...shippingFields({ subtotalInCents: 0, totalInCents: 495 }),
+      }),
     );
     await renderClient();
     expect(await screen.findByText(/no tienes ninguna dirección de envío guardada/i)).toBeInTheDocument();
@@ -134,6 +155,11 @@ describe('CheckoutClient', () => {
     expect(sent.shippingAddressId).toBe('ship-1');
     expect(sent.billingAddressId).toBe('bill-1');
     expect(sent.useShippingAsBilling).toBe(false);
+    // Only the method CODE is sent — never a price.
+    expect(sent.shippingMethodCode).toBe('STANDARD');
+    expect(sent).not.toHaveProperty('shippingInCents');
+    expect(sent).not.toHaveProperty('priceInCents');
+    expect(sent).not.toHaveProperty('totalInCents');
   });
 
   it('offers "use same for billing" only when the shipping address is BOTH', async () => {
@@ -156,6 +182,7 @@ describe('CheckoutClient', () => {
         billingAddresses: [both],
         defaultShippingId: 'both-1',
         defaultBillingId: null,
+        ...shippingFields(),
       }))
       .mockResolvedValueOnce(res(201, { id: 'order-2' }));
 
@@ -187,5 +214,79 @@ describe('CheckoutClient', () => {
 
     expect(await screen.findByText(/la dirección de envío seleccionada no es válida/i)).toBeInTheDocument();
     expect(mockPush).not.toHaveBeenCalled();
+  });
+
+  // ── Phase 11F-alpha: shipping method section + live summary ──────────────────
+
+  it('requests the checkout with the cartId so the backend can price shipping', async () => {
+    mockGetCart.mockResolvedValue(CART);
+    vi.mocked(fetch).mockResolvedValueOnce(res(200, checkoutState()));
+    await renderClient();
+    await screen.findByText(/método de envío/i);
+
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/checkout?cartId=cart-1');
+  });
+
+  it('shows the shipping method section with standard and express prices', async () => {
+    mockGetCart.mockResolvedValue(CART);
+    vi.mocked(fetch).mockResolvedValueOnce(res(200, checkoutState()));
+    await renderClient();
+    await screen.findByText('Método de envío');
+
+    expect(screen.getByRole('radio', { name: /envío estándar/i })).toBeInTheDocument();
+    expect(screen.getByRole('radio', { name: /envío express/i })).toBeInTheDocument();
+    // 4,95 € shows in the standard option AND the summary line (standard is default).
+    expect(screen.getAllByText('4,95 €').length).toBeGreaterThanOrEqual(1);
+    expect(screen.getAllByText('8,95 €').length).toBeGreaterThanOrEqual(1);
+    // Standard is the preselected default.
+    expect(screen.getByRole('radio', { name: /envío estándar/i })).toBeChecked();
+  });
+
+  it('shows "Gratis" for standard when the backend prices it free', async () => {
+    mockGetCart.mockResolvedValue(CART);
+    vi.mocked(fetch).mockResolvedValueOnce(
+      res(200, checkoutState({
+        shippingMethods: [{ ...STANDARD, priceInCents: 0 }, EXPRESS],
+        subtotalInCents: 8000,
+        totalInCents: 8000,
+      })),
+    );
+    await renderClient();
+    await screen.findByText('Método de envío');
+    // "Gratis" appears both in the method option and the summary line.
+    expect(screen.getAllByText('Gratis').length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('updates the total when switching from standard to express', async () => {
+    mockGetCart.mockResolvedValue(CART);
+    vi.mocked(fetch).mockResolvedValueOnce(res(200, checkoutState()));
+    await renderClient();
+    await screen.findByText('Método de envío');
+
+    // Standard default: subtotal 55 + 4,95 = 59,95.
+    expect(screen.getByText('59,95 €')).toBeInTheDocument();
+
+    await user.click(screen.getByRole('radio', { name: /envío express/i }));
+    // Express: subtotal 55 + 8,95 = 63,95.
+    expect(await screen.findByText('63,95 €')).toBeInTheDocument();
+  });
+
+  it('finalizes with the selected express method code (no price sent)', async () => {
+    mockGetCart.mockResolvedValue(CART);
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(res(200, checkoutState()))
+      .mockResolvedValueOnce(res(201, { id: 'order-9' }));
+
+    await renderClient();
+    await screen.findByText('Método de envío');
+    await user.click(screen.getByRole('radio', { name: /envío express/i }));
+    await user.click(screen.getByRole('button', { name: /finalizar compra/i }));
+
+    await waitFor(() => expect(mockPush).toHaveBeenCalledWith('/checkout/orders/order-9'));
+    const [, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1] as [string, RequestInit];
+    const sent = JSON.parse(String(options.body)) as Record<string, unknown>;
+    expect(sent.shippingMethodCode).toBe('EXPRESS');
+    expect(sent).not.toHaveProperty('priceInCents');
   });
 });

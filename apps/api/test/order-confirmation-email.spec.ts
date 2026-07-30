@@ -125,4 +125,56 @@ describe('renderOrderConfirmation template', () => {
     expect(html).toContain('Dirección no disponible para este pedido.');
     expect(html).not.toContain('undefined');
   });
+
+  // ─── Phase 11F-alpha: shipping method + money breakdown ─────────────────────
+
+  it('renders the shipping method and the money breakdown', async () => {
+    const html = await renderOrderConfirmation({
+      orderNumber: 'MORER-SHIP-006',
+      items: [{ productName: 'Camiseta', variantSize: 'M', quantity: 1, priceInCents: 5500 }],
+      subtotalInCents: 5500,
+      shippingInCents: 495,
+      taxInCents: 0,
+      totalInCents: 5995,
+      currency: 'EUR',
+      shippingMethod: { code: 'STANDARD', name: 'Envío estándar', description: '3-5 días laborables' },
+    });
+
+    expect(html).toContain('Método de envío');
+    expect(html).toContain('Envío estándar');
+    expect(html).toContain('3-5 días laborables');
+    expect(html).toContain('Subtotal');
+    expect(html).toContain('Impuestos');
+    expect(html).toContain('Total');
+    expect(html).not.toContain('[object Object]');
+    expect(html).not.toContain('undefined');
+  });
+
+  it('shows "Gratis" for the shipping line when shipping is free', async () => {
+    const html = await renderOrderConfirmation({
+      orderNumber: 'MORER-SHIP-007',
+      items: [],
+      subtotalInCents: 8000,
+      shippingInCents: 0,
+      taxInCents: 0,
+      totalInCents: 8000,
+      currency: 'EUR',
+      shippingMethod: { code: 'STANDARD', name: 'Envío estándar', description: '3-5 días laborables' },
+    });
+
+    expect(html).toContain('Gratis');
+  });
+
+  it('falls back to "Método de envío no disponible." for legacy orders', async () => {
+    const html = await renderOrderConfirmation({
+      orderNumber: 'MORER-SHIP-008',
+      items: [],
+      totalInCents: 1200,
+      currency: 'EUR',
+      shippingMethod: null,
+    });
+
+    expect(html).toContain('Método de envío no disponible.');
+    expect(html).not.toContain('undefined');
+  });
 });

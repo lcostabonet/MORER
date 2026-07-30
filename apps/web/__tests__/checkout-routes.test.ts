@@ -66,6 +66,18 @@ describe('GET /api/checkout', () => {
     const body = (await res.json()) as Record<string, unknown>;
     expect(body.error).not.toBe('Unauthorized');
   });
+
+  it('forwards the cartId query param so the backend can price shipping', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, { shippingAddresses: [], billingAddresses: [], shippingMethods: [] }),
+    );
+    const res = await mod.GET(
+      makeRequest('GET', '/api/checkout?cartId=cart-123', undefined, { [COOKIE_NAME]: 'tok' }),
+    );
+    expect(res.status).toBe(200);
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('/checkout/customer?cartId=cart-123');
+  });
 });
 
 // ─── POST /api/checkout/orders ────────────────────────────────────────────────
@@ -87,6 +99,7 @@ describe('POST /api/checkout/orders', () => {
     shippingAddressId: 'addr-1',
     billingAddressId: 'addr-2',
     useShippingAsBilling: false,
+    shippingMethodCode: 'STANDARD',
   };
 
   it('CSRF cross-site → 403 without calling backend', async () => {
@@ -109,6 +122,9 @@ describe('POST /api/checkout/orders', () => {
       customerId: 'evil',
       shippingAddress: { line1: 'evil st' },
       totalInCents: 1,
+      // Injected shipping price must be dropped — only the method CODE is forwarded.
+      shippingInCents: 0,
+      priceInCents: 0,
     }, { [COOKIE_NAME]: 'tok' });
     const res = await mod.POST(req);
     expect(res.status).toBe(201);
@@ -119,11 +135,14 @@ describe('POST /api/checkout/orders', () => {
     expect((options.headers as Record<string, string>)['Authorization']).toBe('Bearer tok');
     const forwarded = JSON.parse(String(options.body)) as Record<string, unknown>;
     expect(Object.keys(forwarded).sort()).toEqual(
-      ['billingAddressId', 'cartId', 'shippingAddressId', 'useShippingAsBilling'].sort(),
+      ['billingAddressId', 'cartId', 'shippingAddressId', 'shippingMethodCode', 'useShippingAsBilling'].sort(),
     );
+    expect(forwarded.shippingMethodCode).toBe('STANDARD');
     expect(forwarded).not.toHaveProperty('customerId');
     expect(forwarded).not.toHaveProperty('shippingAddress');
     expect(forwarded).not.toHaveProperty('totalInCents');
+    expect(forwarded).not.toHaveProperty('shippingInCents');
+    expect(forwarded).not.toHaveProperty('priceInCents');
   });
 
   it('upstream 400 forwards the message (never the HTTP category)', async () => {

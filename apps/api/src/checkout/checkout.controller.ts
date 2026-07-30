@@ -5,6 +5,7 @@ import {
   HttpCode,
   Param,
   Post,
+  Query,
   Request,
   UseGuards,
   UsePipes,
@@ -43,8 +44,11 @@ export class CheckoutController {
   @Get('customer')
   @HttpCode(200)
   @UseGuards(JwtAuthGuard)
-  getCustomerCheckout(@Request() req: AuthenticatedRequest) {
-    return this.checkoutService.getCustomerCheckout(req.user.id);
+  getCustomerCheckout(
+    @Request() req: AuthenticatedRequest,
+    @Query('cartId') cartId?: string,
+  ) {
+    return this.checkoutService.getCustomerCheckout(req.user.id, cartId);
   }
 
   @Post('customer/from-cart')

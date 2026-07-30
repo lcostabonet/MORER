@@ -12,6 +12,8 @@ const CHECKOUT_FIELDS = [
   'shippingAddressId',
   'billingAddressId',
   'useShippingAsBilling',
+  // Only the method CODE — never a price. Backend re-prices authoritatively.
+  'shippingMethodCode',
 ] as const;
 
 export function pickCheckoutPayload(body: unknown): Record<string, unknown> {

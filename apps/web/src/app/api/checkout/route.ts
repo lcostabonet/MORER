@@ -2,16 +2,22 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getApiUrl, COOKIE_NAME } from '@/lib/auth';
 import { GENERIC_ERROR, SESSION_EXPIRED, forwardApiError } from '@/lib/checkout-bff';
 
-// Returns the authenticated customer's checkout address state (read-only).
+// Returns the authenticated customer's checkout state: addresses, shipping
+// methods priced against the cart subtotal, and the money breakdown (read-only).
 export async function GET(request: NextRequest): Promise<NextResponse> {
   const token = request.cookies.get(COOKIE_NAME)?.value;
   if (!token) {
     return NextResponse.json({ error: SESSION_EXPIRED }, { status: 401 });
   }
 
+  // Forward only the cartId (used by the backend to price shipping). Validated
+  // and re-priced server-side; nothing about pricing is trusted from here.
+  const cartId = request.nextUrl.searchParams.get('cartId');
+  const query = cartId ? `?cartId=${encodeURIComponent(cartId)}` : '';
+
   let apiRes: Response;
   try {
-    apiRes = await fetch(`${getApiUrl()}/checkout/customer`, {
+    apiRes = await fetch(`${getApiUrl()}/checkout/customer${query}`, {
       headers: { Authorization: `Bearer ${token}` },
       cache: 'no-store',
     });

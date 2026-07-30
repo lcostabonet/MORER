@@ -16,6 +16,14 @@ import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.
 import type { CustomerCheckoutDto } from './dto/customer-checkout.dto';
 import type { LookupOrderDto } from './dto/lookup-order.dto';
 import { normalizeOrderAddressSnapshot } from './order-address-snapshot';
+import {
+  DEFAULT_SHIPPING_METHOD_CODE,
+  INVALID_SHIPPING_METHOD,
+  getAvailableShippingMethods,
+  isShippingMethodCode,
+  resolveShippingMethod,
+  type ShippingMethodOption,
+} from './shipping-methods';
 
 // ─── Design notes ─────────────────────────────────────────────────────────────
 //
@@ -112,6 +120,10 @@ type RawOrder = {
   // The legacy `shippingAddress` column is intentionally NOT read here.
   shippingAddressSnapshot?: Prisma.JsonValue | null;
   billingAddressSnapshot?: Prisma.JsonValue | null;
+  // Phase 11F-alpha shipping method snapshot. Null for legacy/guest orders.
+  shippingMethodCode?: string | null;
+  shippingMethodName?: string | null;
+  shippingMethodDescription?: string | null;
   createdAt: Date;
   items: {
     id: string;
@@ -240,7 +252,10 @@ export class CheckoutService {
    * and which are default, for the checkout selection UI. No customerId or
    * internal timestamps are exposed.
    */
-  async getCustomerCheckout(customerId: string): Promise<CustomerCheckoutState> {
+  async getCustomerCheckout(
+    customerId: string,
+    cartId?: string,
+  ): Promise<CustomerCheckoutState> {
     const addresses = (await this.prisma.customerAddress.findMany({
       where: { customerId },
       orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -250,12 +265,37 @@ export class CheckoutService {
     const shippingAddresses = addresses.filter((a) => canBeShipping(a.type as CustomerAddressType));
     const billingAddresses = addresses.filter((a) => canBeBilling(a.type as CustomerAddressType));
 
+    // Shipping methods are priced against the REAL cart subtotal (backend source
+    // of truth). Preliminary total uses the default method (STANDARD).
+    const subtotalInCents = await this.computeCartSubtotal(cartId);
+    const shippingMethods = getAvailableShippingMethods(subtotalInCents);
+    const defaultMethod = resolveShippingMethod(DEFAULT_SHIPPING_METHOD_CODE, subtotalInCents);
+    const taxInCents = 0;
+
     return {
       shippingAddresses,
       billingAddresses,
       defaultShippingId: shippingAddresses.find((a) => a.isDefaultShipping)?.id ?? null,
       defaultBillingId: billingAddresses.find((a) => a.isDefaultBilling)?.id ?? null,
+      shippingMethods,
+      defaultShippingMethodCode: DEFAULT_SHIPPING_METHOD_CODE,
+      subtotalInCents,
+      taxInCents,
+      totalInCents: subtotalInCents + defaultMethod.priceInCents + taxInCents,
     };
+  }
+
+  // Best-effort subtotal from an ACTIVE cart, for pricing shipping in the GET.
+  // Returns 0 for a missing/invalid/inactive/empty cart — the POST re-validates
+  // and re-prices authoritatively, so this only affects preliminary display.
+  private async computeCartSubtotal(cartId?: string): Promise<number> {
+    if (!cartId || !UUID_REGEX.test(cartId)) return 0;
+    const cart = await this.prisma.cart.findUnique({
+      where: { id: cartId },
+      select: { status: true, items: { select: { priceInCents: true, quantity: true } } },
+    });
+    if (!cart || cart.status !== CartStatus.ACTIVE) return 0;
+    return cart.items.reduce((sum, item) => sum + item.priceInCents * item.quantity, 0);
   }
 
   /**
@@ -295,6 +335,13 @@ export class CheckoutService {
     const shippingAddressSnapshot = snapshotAddress(shipping);
     const billingAddressSnapshot = snapshotAddress(billing);
 
+    // Validate the method code up front (fail fast, before reserving stock). The
+    // final PRICE depends on the cart subtotal, so it is computed inside the tx.
+    const methodCode = dto.shippingMethodCode ?? DEFAULT_SHIPPING_METHOD_CODE;
+    if (!isShippingMethodCode(methodCode)) {
+      throw new BadRequestException(INVALID_SHIPPING_METHOD);
+    }
+
     const order = await this.runWithOrderNumberRetry(() =>
       this.prisma.$transaction(
         (tx) =>
@@ -304,6 +351,9 @@ export class CheckoutService {
             resolveCustomerId: async () => customerId,
             shippingAddressSnapshot,
             billingAddressSnapshot,
+            // Re-priced against the authoritative subtotal computed in the tx.
+            resolveShipping: (subtotalInCents) =>
+              resolveShippingMethod(methodCode, subtotalInCents),
           }),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
@@ -378,6 +428,9 @@ export class CheckoutService {
       resolveCustomerId: (tx: Prisma.TransactionClient) => Promise<string>;
       shippingAddressSnapshot?: Prisma.InputJsonValue;
       billingAddressSnapshot?: Prisma.InputJsonValue;
+      // Prices the chosen shipping method against the authoritative cart subtotal.
+      // Absent for the guest flow → no shipping cost, no method (legacy behaviour).
+      resolveShipping?: (subtotalInCents: number) => ShippingMethodOption;
     },
   ): Promise<RawOrder> {
     const cart = await tx.cart.findUnique({
@@ -395,7 +448,7 @@ export class CheckoutService {
       throw new BadRequestException('Cart is empty');
     }
 
-    let totalInCents = 0;
+    let subtotalInCents = 0;
     for (const item of cart.items as CartItemWithVariant[]) {
       const { variant } = item;
 
@@ -425,10 +478,17 @@ export class CheckoutService {
         data: { reservedQuantity: { increment: item.quantity } },
       });
 
-      totalInCents += item.priceInCents * item.quantity;
+      subtotalInCents += item.priceInCents * item.quantity;
     }
 
     const customerId = await opts.resolveCustomerId(tx);
+
+    // Backend is the single source of truth: shipping is re-priced against the
+    // subtotal computed above; tax is 0 this phase; total includes shipping.
+    const shipping = opts.resolveShipping ? opts.resolveShipping(subtotalInCents) : null;
+    const shippingInCents = shipping?.priceInCents ?? 0;
+    const taxInCents = 0;
+    const totalInCents = subtotalInCents + shippingInCents + taxInCents;
 
     const newOrder = await tx.order.create({
       data: {
@@ -436,9 +496,16 @@ export class CheckoutService {
         customerId,
         status: OrderStatus.PENDING_PAYMENT,
         totalInCents,
-        shippingInCents: 0, // calculated at payment (Fase 8)
-        taxInCents: 0, // calculated at payment (Fase 8)
+        shippingInCents,
+        taxInCents,
         email: opts.email,
+        ...(shipping
+          ? {
+              shippingMethodCode: shipping.code,
+              shippingMethodName: shipping.name,
+              shippingMethodDescription: shipping.description,
+            }
+          : {}),
         ...(opts.shippingAddressSnapshot !== undefined
           ? { shippingAddressSnapshot: opts.shippingAddressSnapshot }
           : {}),
@@ -571,13 +638,29 @@ export class CheckoutService {
   // ─── Private helpers ───────────────────────────────────────────────────────
 
   private mapOrder(order: RawOrder): OrderResponse {
+    const shippingInCents = order.shippingInCents;
+    const taxInCents = order.taxInCents;
+    // Derived — exact for both new and legacy orders (no stored column needed).
+    const subtotalInCents = order.totalInCents - shippingInCents - taxInCents;
+
+    // Method snapshot present only when all three columns are set (new orders).
+    const shippingMethod =
+      order.shippingMethodCode && order.shippingMethodName && order.shippingMethodDescription
+        ? {
+            code: order.shippingMethodCode,
+            name: order.shippingMethodName,
+            description: order.shippingMethodDescription,
+          }
+        : null;
+
     return {
       id: order.id,
       orderNumber: order.orderNumber,
       status: order.status,
+      subtotalInCents,
+      shippingInCents,
+      taxInCents,
       totalInCents: order.totalInCents,
-      shippingInCents: order.shippingInCents,
-      taxInCents: order.taxInCents,
       currency: CURRENCY,
       items: order.items.map((item) => ({
         id: item.id,
@@ -591,6 +674,7 @@ export class CheckoutService {
       // and never read from the legacy `shippingAddress` column.
       shippingAddress: normalizeOrderAddressSnapshot(order.shippingAddressSnapshot),
       billingAddress: normalizeOrderAddressSnapshot(order.billingAddressSnapshot),
+      shippingMethod,
       createdAt: order.createdAt,
     };
   }

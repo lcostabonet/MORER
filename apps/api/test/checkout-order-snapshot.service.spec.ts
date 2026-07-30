@@ -110,6 +110,72 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
     const result = await service.findOrder(ORDER_ID);
     expect(result.shippingAddress).toBeNull();
   });
+
+  // ── Phase 11F-alpha: money breakdown + shipping method ──────────────────────
+
+  it('derives subtotal and exposes the shipping method + costs', async () => {
+    mock.order.findUnique.mockResolvedValue(
+      baseOrder({
+        totalInCents: 5995,
+        shippingInCents: 495,
+        taxInCents: 0,
+        shippingMethodCode: 'STANDARD',
+        shippingMethodName: 'Envío estándar',
+        shippingMethodDescription: '3-5 días laborables',
+      }),
+    );
+    const r = await service.findOrder(ORDER_ID);
+    expect(r.subtotalInCents).toBe(5500); // 5995 - 495 - 0
+    expect(r.shippingInCents).toBe(495);
+    expect(r.taxInCents).toBe(0);
+    expect(r.totalInCents).toBe(5995);
+    expect(r.shippingMethod).toEqual({
+      code: 'STANDARD',
+      name: 'Envío estándar',
+      description: '3-5 días laborables',
+    });
+  });
+
+  it('exposes free shipping (0) with the method still present', async () => {
+    mock.order.findUnique.mockResolvedValue(
+      baseOrder({
+        totalInCents: 8000,
+        shippingInCents: 0,
+        taxInCents: 0,
+        shippingMethodCode: 'STANDARD',
+        shippingMethodName: 'Envío estándar',
+        shippingMethodDescription: '3-5 días laborables',
+      }),
+    );
+    const r = await service.findOrder(ORDER_ID);
+    expect(r.shippingInCents).toBe(0);
+    expect(r.subtotalInCents).toBe(8000);
+    expect(r.shippingMethod?.code).toBe('STANDARD');
+  });
+
+  it('legacy order without a method → shippingMethod null, subtotal = total', async () => {
+    mock.order.findUnique.mockResolvedValue(
+      baseOrder({
+        totalInCents: 1200,
+        shippingInCents: 0,
+        taxInCents: 0,
+        shippingMethodCode: null,
+        shippingMethodName: null,
+        shippingMethodDescription: null,
+      }),
+    );
+    const r = await service.findOrder(ORDER_ID);
+    expect(r.shippingMethod).toBeNull();
+    expect(r.subtotalInCents).toBe(1200);
+  });
+
+  it('treats a partial method (missing name/description) as no method', async () => {
+    mock.order.findUnique.mockResolvedValue(
+      baseOrder({ shippingMethodCode: 'STANDARD', shippingMethodName: null, shippingMethodDescription: null }),
+    );
+    const r = await service.findOrder(ORDER_ID);
+    expect(r.shippingMethod).toBeNull();
+  });
 });
 
 describe('normalizeOrderAddressSnapshot (11E-beta)', () => {

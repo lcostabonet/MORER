@@ -48,7 +48,12 @@ function paidOrderFixture(overrides: Record<string, unknown> = {}) {
     status: 'PAID',
     email: CUSTOMER_EMAIL,
     totalInCents: 5000,
+    shippingInCents: 0,
+    taxInCents: 0,
     confirmationEmailSentAt: null,
+    shippingMethodCode: null,
+    shippingMethodName: null,
+    shippingMethodDescription: null,
     items: [
       {
         productName: 'Camiseta',
@@ -148,6 +153,44 @@ describe('EmailService.sendOrderConfirmationIfNeeded (Phase 10A)', () => {
     const arg = vi.mocked(renderOrderConfirmation).mock.calls[0][0];
     expect(arg.shippingAddress).not.toHaveProperty('addressId');
     expect(arg.shippingAddress).not.toHaveProperty('customerId');
+  });
+
+  // Phase 11F-alpha: money breakdown + shipping method are forwarded to the template.
+  it('passes the money breakdown and shipping method to the confirmation template', async () => {
+    mock.order.findUnique.mockResolvedValue(
+      paidOrderFixture({
+        totalInCents: 5995,
+        shippingInCents: 495,
+        taxInCents: 0,
+        shippingMethodCode: 'STANDARD',
+        shippingMethodName: 'Envío estándar',
+        shippingMethodDescription: '3-5 días laborables',
+      }),
+    );
+
+    await service.sendOrderConfirmationIfNeeded(ORDER_ID);
+
+    expect(renderOrderConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({
+        subtotalInCents: 5500, // 5995 - 495 - 0
+        shippingInCents: 495,
+        taxInCents: 0,
+        totalInCents: 5995,
+        shippingMethod: {
+          code: 'STANDARD',
+          name: 'Envío estándar',
+          description: '3-5 días laborables',
+        },
+      }),
+    );
+  });
+
+  it('forwards a null shipping method for legacy orders', async () => {
+    mock.order.findUnique.mockResolvedValue(paidOrderFixture()); // null method fields
+    await service.sendOrderConfirmationIfNeeded(ORDER_ID);
+    expect(renderOrderConfirmation).toHaveBeenCalledWith(
+      expect.objectContaining({ shippingMethod: null }),
+    );
   });
 
   it('marks confirmationEmailSentAt after the provider accepts the email', async () => {

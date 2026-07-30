@@ -195,6 +195,13 @@ model Order {
   // by the authenticated saved-address flow).
   shippingAddressSnapshot Json?
   billingAddressSnapshot  Json?
+  // Phase 11F-alpha: chosen shipping method snapshot (authenticated checkout).
+  // Nullable so legacy/guest orders remain valid; name/description are copied at
+  // order time so past orders keep their original labels. shippingInCents already
+  // holds the cost; totalInCents already includes it.
+  shippingMethodCode        String?
+  shippingMethodName        String?
+  shippingMethodDescription String?
   email                   String?
   confirmationEmailSentAt DateTime?
   trackingNumber          String?

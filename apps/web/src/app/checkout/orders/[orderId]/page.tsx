@@ -8,6 +8,8 @@ import { CancelOrderButton } from '@/components/cancel-order-button';
 import { PaymentForm } from '@/components/payment-form';
 import { AutoRefresh } from '@/components/auto-refresh';
 import { OrderAddressBlock } from './_components/OrderAddressBlock';
+import { OrderShippingMethodBlock } from './_components/OrderShippingMethodBlock';
+import { OrderMoneySummary } from './_components/OrderMoneySummary';
 
 async function fetchOrder(orderId: string): Promise<OrderResponse> {
   const res = await fetch(`${API_URL}/checkout/orders/${orderId}`, {
@@ -174,6 +176,14 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
             <OrderAddressBlock title="Dirección de facturación" address={order.billingAddress} />
           </div>
 
+          {/* Shipping method (Phase 11F-alpha) */}
+          <div className="pt-10 mt-2 border-t border-stone-100">
+            <OrderShippingMethodBlock
+              method={order.shippingMethod}
+              shippingInCents={order.shippingInCents}
+            />
+          </div>
+
           {/* PENDING — payment form (only when not returning from 3D Secure) */}
           {isPending && !returnedFromStripe && (
             <div className="pt-10 mt-2 border-t border-stone-100">
@@ -204,11 +214,13 @@ export default async function OrderPage({ params, searchParams }: PageProps) {
               </span>
             </div>
 
-            {/* Total — always from backend, never calculated in frontend */}
-            <div className="flex justify-between items-center pb-6 border-b border-stone-200 mb-6">
-              <span className="text-sm text-stone-600">Total</span>
-              <Price cents={order.totalInCents} className="text-sm font-medium text-stone-900" />
-            </div>
+            {/* Money breakdown — always from backend, never calculated in frontend */}
+            <OrderMoneySummary
+              subtotalInCents={order.subtotalInCents}
+              shippingInCents={order.shippingInCents}
+              taxInCents={order.taxInCents}
+              totalInCents={order.totalInCents}
+            />
 
             <p className="text-xs text-stone-400 mb-8 leading-relaxed">
               {isPaid

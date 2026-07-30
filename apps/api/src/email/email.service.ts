@@ -14,10 +14,16 @@ type OrderWithItems = {
   status: string;
   email: string | null;
   totalInCents: number;
+  shippingInCents: number;
+  taxInCents: number;
   confirmationEmailSentAt: Date | null;
   // Immutable address snapshots taken at order time (Phase 11E). Null for legacy orders.
   shippingAddressSnapshot: unknown;
   billingAddressSnapshot: unknown;
+  // Shipping method snapshot (Phase 11F). Null for legacy/guest orders.
+  shippingMethodCode: string | null;
+  shippingMethodName: string | null;
+  shippingMethodDescription: string | null;
   items: Array<{
     productName: string;
     variantSize: string;
@@ -118,8 +124,21 @@ export class EmailService {
           quantity: item.quantity,
           priceInCents: item.priceInCents,
         })),
+        // Money breakdown (Phase 11F). subtotal derived so it is exact for legacy orders.
+        subtotalInCents: order.totalInCents - order.shippingInCents - order.taxInCents,
+        shippingInCents: order.shippingInCents,
+        taxInCents: order.taxInCents,
         totalInCents: order.totalInCents,
         currency: CURRENCY,
+        // Shipping method snapshot (Phase 11F). Null → neutral fallback in template.
+        shippingMethod:
+          order.shippingMethodCode && order.shippingMethodName && order.shippingMethodDescription
+            ? {
+                code: order.shippingMethodCode,
+                name: order.shippingMethodName,
+                description: order.shippingMethodDescription,
+              }
+            : null,
         // Immutable snapshots from the order (Phase 11E-beta). Null → neutral
         // fallback rendered by the template. Never the live CustomerAddress.
         shippingAddress: normalizeOrderAddressSnapshot(order.shippingAddressSnapshot),

@@ -5,7 +5,12 @@ import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import { getOrCreateSessionId, clearSessionId } from '@/lib/session';
 import { getCartBySession } from '@/lib/cart-api';
-import type { CheckoutAddress, CustomerCheckoutState } from '@/lib/checkout-types';
+import { Price } from '@/components/price';
+import type {
+  CheckoutAddress,
+  CustomerCheckoutState,
+  ShippingMethodCode,
+} from '@/lib/checkout-types';
 
 type Phase = 'loading' | 'empty-cart' | 'no-address' | 'ready' | 'error';
 
@@ -25,6 +30,7 @@ export function CheckoutClient() {
   const [selectedShippingId, setSelectedShippingId] = useState('');
   const [selectedBillingId, setSelectedBillingId] = useState('');
   const [useShippingAsBilling, setUseShippingAsBilling] = useState(false);
+  const [shippingMethodCode, setShippingMethodCode] = useState<ShippingMethodCode>('STANDARD');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -40,7 +46,10 @@ export function CheckoutClient() {
       }
       setCartId(cart.id);
 
-      const res = await fetch('/api/checkout', { method: 'GET' });
+      // The cartId lets the backend price shipping against the real subtotal.
+      const res = await fetch(`/api/checkout?cartId=${encodeURIComponent(cart.id)}`, {
+        method: 'GET',
+      });
       if (res.status === 401) {
         router.replace('/login?next=/checkout');
         return;
@@ -53,7 +62,8 @@ export function CheckoutClient() {
       if (
         !data ||
         !Array.isArray(data.shippingAddresses) ||
-        !Array.isArray(data.billingAddresses)
+        !Array.isArray(data.billingAddresses) ||
+        !Array.isArray(data.shippingMethods)
       ) {
         setPhase('error');
         return;
@@ -70,9 +80,8 @@ export function CheckoutClient() {
       const shipAddr = data.shippingAddresses.find((a) => a.id === shipId) ?? null;
       setSelectedShippingId(shipId);
       setSelectedBillingId(data.defaultBillingId ?? data.billingAddresses[0]?.id ?? '');
-      // Only default to "same for billing" when the shipping address is BOTH and
-      // there is no separate default billing address.
       setUseShippingAsBilling(shipAddr?.type === 'BOTH' && !data.defaultBillingId);
+      setShippingMethodCode(data.defaultShippingMethodCode ?? 'STANDARD');
 
       setPhase('ready');
     } catch {
@@ -88,6 +97,16 @@ export function CheckoutClient() {
     state?.shippingAddresses.find((a) => a.id === selectedShippingId) ?? null;
   const shippingIsBoth = selectedShipping?.type === 'BOTH';
   const billingAddresses = state?.billingAddresses ?? [];
+  const shippingMethods = state?.shippingMethods ?? [];
+
+  // Money summary — recomputed from the backend-provided subtotal and the priced
+  // method the customer selected. The client never invents prices.
+  const selectedMethod =
+    shippingMethods.find((m) => m.code === shippingMethodCode) ?? null;
+  const subtotalInCents = state?.subtotalInCents ?? 0;
+  const taxInCents = state?.taxInCents ?? 0;
+  const shippingInCents = selectedMethod?.priceInCents ?? 0;
+  const totalInCents = subtotalInCents + shippingInCents + taxInCents;
 
   function changeShipping(id: string) {
     setSelectedShippingId(id);
@@ -97,9 +116,8 @@ export function CheckoutClient() {
 
   const canFinalize =
     Boolean(selectedShippingId) &&
-    (useShippingAsBilling && shippingIsBoth
-      ? true
-      : Boolean(selectedBillingId));
+    Boolean(selectedMethod) &&
+    (useShippingAsBilling && shippingIsBoth ? true : Boolean(selectedBillingId));
 
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault();
@@ -116,6 +134,8 @@ export function CheckoutClient() {
           cartId,
           shippingAddressId: selectedShippingId,
           useShippingAsBilling: sameForBilling,
+          // Only the method CODE — never a price.
+          shippingMethodCode,
           ...(sameForBilling ? {} : { billingAddressId: selectedBillingId }),
         }),
       });
@@ -197,7 +217,7 @@ export function CheckoutClient() {
 
   return (
     <form onSubmit={handleSubmit} className="space-y-10">
-      {/* Shipping */}
+      {/* Shipping address */}
       <fieldset>
         <legend className="text-xs font-medium tracking-[0.2em] uppercase text-stone-400 mb-4">
           Dirección de envío
@@ -227,7 +247,7 @@ export function CheckoutClient() {
         </div>
       </fieldset>
 
-      {/* Billing */}
+      {/* Billing address */}
       <fieldset>
         <legend className="text-xs font-medium tracking-[0.2em] uppercase text-stone-400 mb-4">
           Dirección de facturación
@@ -285,6 +305,59 @@ export function CheckoutClient() {
         )}
       </fieldset>
 
+      {/* Shipping method (Phase 11F) */}
+      <fieldset>
+        <legend className="text-xs font-medium tracking-[0.2em] uppercase text-stone-400 mb-4">
+          Método de envío
+        </legend>
+        <div className="space-y-3">
+          {shippingMethods.map((m) => (
+            <label
+              key={m.code}
+              className="flex items-start gap-3 border border-stone-200 rounded-sm p-4 bg-white cursor-pointer"
+            >
+              <input
+                type="radio"
+                name="shipping-method"
+                value={m.code}
+                checked={shippingMethodCode === m.code}
+                onChange={() => setShippingMethodCode(m.code)}
+                className="mt-1"
+              />
+              <span className="flex-1 flex items-start justify-between gap-4">
+                <span className="text-sm text-stone-800">
+                  {m.name}
+                  <span className="block text-xs text-stone-500 mt-0.5">{m.description}</span>
+                </span>
+                <span className="text-sm font-medium text-stone-900 whitespace-nowrap">
+                  {m.priceInCents === 0 ? 'Gratis' : <Price cents={m.priceInCents} />}
+                </span>
+              </span>
+            </label>
+          ))}
+        </div>
+      </fieldset>
+
+      {/* Order summary */}
+      <div className="bg-stone-50 rounded-sm p-6 space-y-2">
+        <div className="flex justify-between text-sm text-stone-600">
+          <span>Subtotal</span>
+          <Price cents={subtotalInCents} />
+        </div>
+        <div className="flex justify-between text-sm text-stone-600">
+          <span>Envío</span>
+          <span>{shippingInCents === 0 ? 'Gratis' : <Price cents={shippingInCents} />}</span>
+        </div>
+        <div className="flex justify-between text-sm text-stone-600">
+          <span>Impuestos</span>
+          <Price cents={taxInCents} />
+        </div>
+        <div className="flex justify-between text-sm font-medium text-stone-900 pt-2 border-t border-stone-200">
+          <span>Total</span>
+          <Price cents={totalInCents} />
+        </div>
+      </div>
+
       <div aria-live="assertive" aria-atomic="true">
         {error && (
           <div role="alert" className="bg-red-50 border border-red-200 rounded-sm p-4">
@@ -306,8 +379,7 @@ export function CheckoutClient() {
       </button>
 
       <p className="text-xs text-stone-400 text-center leading-relaxed">
-        El pago se realiza en el siguiente paso. Envío e impuestos se calcularán
-        más adelante.
+        El pago se realiza en el siguiente paso.
       </p>
     </form>
   );

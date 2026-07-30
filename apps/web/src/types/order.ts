@@ -20,17 +20,26 @@ export interface OrderAddressSnapshot {
   countryCode: string;
 }
 
+// Shipping method chosen for the order (Phase 11F). Null for legacy/guest orders.
+export interface OrderShippingMethod {
+  code: string;
+  name: string;
+  description: string;
+}
+
 export interface OrderResponse {
   id: string;
   orderNumber: string;
   status: string;
-  totalInCents: number;
+  subtotalInCents: number;
   shippingInCents: number;
   taxInCents: number;
+  totalInCents: number;
   currency: string;
   items: OrderItemResponse[];
   // Null for legacy orders created before snapshots existed.
   shippingAddress: OrderAddressSnapshot | null;
   billingAddress: OrderAddressSnapshot | null;
+  shippingMethod: OrderShippingMethod | null;
   createdAt: string;
 }

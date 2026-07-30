@@ -1,6 +1,8 @@
 import type { OrderAddressSnapshot } from './order-address-snapshot';
+import type { ShippingMethodCode, ShippingMethodOption } from './shipping-methods';
 
 export type { OrderAddressSnapshot } from './order-address-snapshot';
+export type { ShippingMethodOption } from './shipping-methods';
 
 export interface OrderItemResponse {
   id: string;
@@ -11,13 +13,23 @@ export interface OrderItemResponse {
   lineTotalInCents: number;
 }
 
+// Shipping method chosen for the order (Phase 11F). Null for legacy/guest orders.
+export interface OrderShippingMethod {
+  code: string;
+  name: string;
+  description: string;
+}
+
 export interface OrderResponse {
   id: string;
   orderNumber: string;
   status: string;
-  totalInCents: number;
+  // Money breakdown. subtotalInCents is derived (total - shipping - tax) so it is
+  // exact for both new and legacy orders without a stored column.
+  subtotalInCents: number;
   shippingInCents: number;
   taxInCents: number;
+  totalInCents: number;
   currency: string;
   items: OrderItemResponse[];
   // Immutable address snapshots taken at order time (Phase 11E). Null for legacy
@@ -25,6 +37,7 @@ export interface OrderResponse {
   // CustomerAddress nor from the legacy `shippingAddress` column.
   shippingAddress: OrderAddressSnapshot | null;
   billingAddress: OrderAddressSnapshot | null;
+  shippingMethod: OrderShippingMethod | null;
   createdAt: Date;
 }
 
@@ -53,4 +66,11 @@ export interface CustomerCheckoutState {
   billingAddresses: CheckoutAddress[];
   defaultShippingId: string | null;
   defaultBillingId: string | null;
+  // Phase 11F-alpha: shipping methods priced against the current cart subtotal,
+  // plus the money breakdown for the default method. Backend is the source of truth.
+  shippingMethods: ShippingMethodOption[];
+  defaultShippingMethodCode: ShippingMethodCode;
+  subtotalInCents: number;
+  taxInCents: number;
+  totalInCents: number;
 }

@@ -24,6 +24,13 @@ export interface OrderConfirmationAddress {
   countryCode: string;
 }
 
+// Shipping method snapshot (Phase 11F). Null → neutral fallback.
+export interface OrderConfirmationShippingMethod {
+  code: string;
+  name: string;
+  description: string;
+}
+
 export interface OrderConfirmationData {
   orderNumber: string;
   items: Array<{
@@ -34,12 +41,19 @@ export interface OrderConfirmationData {
   }>;
   totalInCents: number;
   currency: string;
+  // Money breakdown (Phase 11F). Optional so existing callers/tests keep working;
+  // legacy fallback: subtotal defaults to total, shipping/tax default to 0.
+  subtotalInCents?: number;
+  shippingInCents?: number;
+  taxInCents?: number;
+  shippingMethod?: OrderConfirmationShippingMethod | null;
   // Optional so existing callers/tests keep working. Null → neutral fallback.
   shippingAddress?: OrderConfirmationAddress | null;
   billingAddress?: OrderConfirmationAddress | null;
 }
 
 const ADDRESS_UNAVAILABLE = 'Dirección no disponible para este pedido.';
+const SHIPPING_METHOD_UNAVAILABLE = 'Método de envío no disponible.';
 
 // Postal formatting shared with the web helper (kept intentionally simple/local).
 function formatAddressLines(address: OrderConfirmationAddress): string[] {
@@ -118,9 +132,17 @@ export function OrderConfirmationEmail({
   items,
   totalInCents,
   currency,
+  subtotalInCents,
+  shippingInCents,
+  taxInCents,
+  shippingMethod,
   shippingAddress,
   billingAddress,
 }: OrderConfirmationData) {
+  const subtotal = subtotalInCents ?? totalInCents;
+  const shipping = shippingInCents ?? 0;
+  const tax = taxInCents ?? 0;
+  const shippingLabel = shipping === 0 ? 'Gratis' : formatPrice(shipping, currency);
   return (
     <Html lang="es">
       <Head />
@@ -176,9 +198,53 @@ export function OrderConfirmationEmail({
 
           <Hr style={{ borderColor: '#e5e7eb', margin: '16px 0' }} />
 
-          <Text style={{ fontSize: '16px', fontWeight: '700', margin: '0 0 4px' }}>
-            Total: {formatPrice(totalInCents, currency)}
-          </Text>
+          {/* Shipping method (Phase 11F) */}
+          <Section style={{ marginBottom: '12px' }}>
+            <Heading
+              as="h3"
+              style={{
+                fontSize: '11px',
+                fontWeight: '600',
+                textTransform: 'uppercase',
+                letterSpacing: '0.08em',
+                color: '#6b7280',
+                margin: '0 0 8px',
+              }}
+            >
+              Método de envío
+            </Heading>
+            {shippingMethod ? (
+              <>
+                <Text style={{ margin: '0 0 2px', fontSize: '14px', fontWeight: '600' }}>
+                  {shippingMethod.name}
+                </Text>
+                <Text style={{ margin: '0 0 2px', fontSize: '13px', color: '#4b5563' }}>
+                  {shippingMethod.description}
+                </Text>
+                <Text style={{ margin: 0, fontSize: '13px', color: '#374151' }}>{shippingLabel}</Text>
+              </>
+            ) : (
+              <Text style={{ margin: 0, fontSize: '13px', color: '#9ca3af' }}>
+                {SHIPPING_METHOD_UNAVAILABLE}
+              </Text>
+            )}
+          </Section>
+
+          {/* Money breakdown (Phase 11F) */}
+          <Section style={{ marginBottom: '4px' }}>
+            <Text style={{ margin: '0 0 4px', fontSize: '13px', color: '#374151' }}>
+              Subtotal: {formatPrice(subtotal, currency)}
+            </Text>
+            <Text style={{ margin: '0 0 4px', fontSize: '13px', color: '#374151' }}>
+              Envío: {shippingLabel}
+            </Text>
+            <Text style={{ margin: '0 0 8px', fontSize: '13px', color: '#374151' }}>
+              Impuestos: {formatPrice(tax, currency)}
+            </Text>
+            <Text style={{ fontSize: '16px', fontWeight: '700', margin: 0 }}>
+              Total: {formatPrice(totalInCents, currency)}
+            </Text>
+          </Section>
 
           <Hr style={{ borderColor: '#e5e7eb', margin: '24px 0 16px' }} />
 
