@@ -4,14 +4,14 @@ import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
 import { getOrCreateSessionId } from '@/lib/session';
 import { getCartBySession, updateCartItem, removeCartItem } from '@/lib/cart-api';
-import { CheckoutButton } from './checkout-button';
+import { CheckoutCta } from './checkout-cta';
 import type { CartResponse } from '@/types/cart';
 import { CartItemRow } from './cart-item-row';
 import { Price } from './price';
 
 type PageState = 'loading' | 'empty' | 'loaded' | 'error';
 
-export function CartContent() {
+export function CartContent({ isAuthenticated }: { isAuthenticated: boolean }) {
   const [state, setState] = useState<PageState>('loading');
   const [cart, setCart] = useState<CartResponse | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
@@ -143,7 +143,7 @@ export function CartContent() {
             Gastos de envío e impuestos calculados en el siguiente paso.
           </p>
 
-          <CheckoutButton cartId={cart.id} />
+          <CheckoutCta isAuthenticated={isAuthenticated} />
         </div>
       </div>
     </div>
