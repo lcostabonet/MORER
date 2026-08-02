@@ -93,6 +93,58 @@ describe('GET /api/checkout', () => {
     expect(url).not.toContain('customerId');
   });
 
+  it('projects the state through an allowlist: strips sessionId/customerId/internals, keeps UI data', async () => {
+    mockResolveThen(makeFetchResponse(200, {
+      // Fields the upstream must NEVER be allowed to leak through the BFF:
+      sessionId: 'LEAK-session',
+      customerId: 'LEAK-customer',
+      cartId: 'LEAK-cart',
+      __internalDebug: 'LEAK-debug',
+      shippingAddresses: [{
+        id: 'addr-1', fullName: 'Ana', phone: null, line1: 'Calle 1', line2: null,
+        postalCode: '28001', city: 'Madrid', province: 'Madrid', countryCode: 'ES',
+        type: 'SHIPPING', isDefaultShipping: true, isDefaultBilling: false,
+        customerId: 'LEAK-customer', createdAt: '2026-01-01', updatedAt: '2026-01-01',
+      }],
+      billingAddresses: [],
+      defaultShippingId: 'addr-1',
+      defaultBillingId: null,
+      shippingMethods: [{ code: 'STANDARD', name: 'Envío estándar', description: '3-5 días laborables', priceInCents: 495 }],
+      defaultShippingMethodCode: 'STANDARD',
+      subtotalInCents: 5500,
+      taxInCents: 0,
+      totalInCents: 5995,
+    }));
+    const res = await mod.GET(makeRequest('GET', '/api/checkout', undefined, BOTH_COOKIES));
+    expect(res.status).toBe(200);
+    const state = (await res.json()) as Record<string, unknown>;
+    const raw = JSON.stringify(state);
+
+    // Nothing server-only leaks anywhere in the payload.
+    for (const leak of ['LEAK-session', 'LEAK-customer', 'LEAK-cart', 'LEAK-debug', '__internalDebug']) {
+      expect(raw).not.toContain(leak);
+    }
+    expect(state).not.toHaveProperty('sessionId');
+    expect(state).not.toHaveProperty('customerId');
+    expect(state).not.toHaveProperty('cartId');
+
+    // UI-required data is preserved and address internals are dropped.
+    const ship = (state.shippingAddresses as Record<string, unknown>[])[0];
+    expect(ship.id).toBe('addr-1');
+    expect(ship.fullName).toBe('Ana');
+    expect(ship).not.toHaveProperty('customerId');
+    expect(ship).not.toHaveProperty('createdAt');
+    expect(state.defaultShippingId).toBe('addr-1');
+    expect((state.shippingMethods as Record<string, unknown>[])[0].priceInCents).toBe(495);
+    expect(state.subtotalInCents).toBe(5500);
+    expect(state.totalInCents).toBe(5995);
+    expect(state.defaultShippingMethodCode).toBe('STANDARD');
+
+    // No serialization artifacts.
+    expect(raw).not.toContain('[object Object]');
+    expect(raw).not.toContain('undefined');
+  });
+
   it('creates the cart-session cookie when missing and sends no cartId', async () => {
     // No cart-session cookie → isNew → no resolve fetch, no cartId forwarded.
     vi.mocked(fetch).mockResolvedValueOnce(
@@ -199,6 +251,24 @@ describe('POST /api/checkout/orders', () => {
     expect(forwarded).not.toHaveProperty('totalInCents');
     expect(forwarded).not.toHaveProperty('shippingInCents');
     expect(forwarded).not.toHaveProperty('priceInCents');
+  });
+
+  it('projects the order response to { id } only (strips any upstream internals)', async () => {
+    mockResolveThen(makeFetchResponse(201, {
+      id: 'order-1',
+      customerId: 'LEAK-customer',
+      email: 'internal@leak.local',
+      shippingAddressSnapshot: { fullName: 'Ana' },
+      __debug: 'LEAK-debug',
+    }));
+    const res = await mod.POST(makeRequest('POST', '/api/checkout/orders', VALID, BOTH_COOKIES));
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body).toEqual({ id: 'order-1' });
+    const raw = JSON.stringify(body);
+    for (const leak of ['LEAK-customer', 'internal@leak.local', 'LEAK-debug', 'shippingAddressSnapshot']) {
+      expect(raw).not.toContain(leak);
+    }
   });
 
   it('upstream 400 forwards the message (never the HTTP category)', async () => {

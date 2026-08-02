@@ -6,6 +6,7 @@ import {
   SESSION_EXPIRED,
   forwardApiError,
   pickCheckoutPayload,
+  toClientOrder,
 } from '@/lib/checkout-bff';
 import { readCartSession, resolveActiveCartId } from '@/lib/cart-session';
 
@@ -55,6 +56,7 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
   if (!apiRes.ok) return forwardApiError(apiRes);
 
+  // Only the order id is exposed — the order page fetches the full order itself.
   const data = (await apiRes.json()) as unknown;
-  return NextResponse.json(data, { status: 201 });
+  return NextResponse.json(toClientOrder(data), { status: 201 });
 }

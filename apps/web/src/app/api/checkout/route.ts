@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getApiUrl, COOKIE_NAME } from '@/lib/auth';
-import { GENERIC_ERROR, SESSION_EXPIRED, forwardApiError } from '@/lib/checkout-bff';
+import { GENERIC_ERROR, SESSION_EXPIRED, forwardApiError, toClientCheckout } from '@/lib/checkout-bff';
 import {
   getOrCreateCartSession,
   resolveActiveCartId,
@@ -41,8 +41,9 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return res;
   }
 
+  // Explicit allowlist projection — never forward the upstream object verbatim.
   const data = (await apiRes.json()) as unknown;
-  const res = NextResponse.json(data, { status: 200 });
+  const res = NextResponse.json(toClientCheckout(data), { status: 200 });
   if (isNew) setCartSessionCookie(res, sessionId);
   return res;
 }
