@@ -1,5 +1,5 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { BadRequestException } from '@nestjs/common';
+import { BadRequestException, NotFoundException } from '@nestjs/common';
 import { CheckoutService } from '../src/checkout/checkout.service';
 import { asPrismaService, createPrismaMock } from './helpers/prisma-mock';
 import type { PrismaMock } from './helpers/prisma-mock';
@@ -13,6 +13,7 @@ const EMAIL = 'Cliente@Ejemplo.com';
 const VALID_CART = {
   id: CART_ID,
   status: 'ACTIVE',
+  customerId: CUSTOMER_ID, // owned by the current customer (ownership check passes)
   items: [
     {
       id: 'item-1',
@@ -63,7 +64,11 @@ function ownedAddress(overrides: Record<string, unknown> = {}) {
 
 type PrismaMockWithAddress = PrismaMock & {
   customerAddress: { findMany: ReturnType<typeof vi.fn>; findFirst: ReturnType<typeof vi.fn> };
-  cart: { findUnique: ReturnType<typeof vi.fn> };
+  cart: {
+    findUnique: ReturnType<typeof vi.fn>;
+    findFirst: ReturnType<typeof vi.fn>;
+    updateMany: ReturnType<typeof vi.fn>;
+  };
 };
 
 function makeMock(): PrismaMockWithAddress {
@@ -72,21 +77,28 @@ function makeMock(): PrismaMockWithAddress {
     findMany: vi.fn().mockResolvedValue([]),
     findFirst: vi.fn().mockResolvedValue(null),
   };
-  // Top-level cart lookup used by getCustomerCheckout to price shipping.
-  mock.cart = { findUnique: vi.fn().mockResolvedValue(null) };
+  // Top-level cart access used by getCustomerCheckout to claim + price the OWN cart.
+  mock.cart = {
+    findUnique: vi.fn().mockResolvedValue(null),
+    findFirst: vi.fn().mockResolvedValue(null),
+    updateMany: vi.fn().mockResolvedValue({ count: 0 }),
+  };
   return mock;
 }
 
-// Minimal ACTIVE cart shape read by computeCartSubtotal (getCustomerCheckout).
-function activeCart(subtotalInCents: number) {
-  return { status: 'ACTIVE', items: [{ priceInCents: subtotalInCents, quantity: 1 }] };
+// Owned-cart shape returned by computeCartSubtotal's findFirst (getCustomerCheckout).
+// findFirst already filters by { id, customerId, status: ACTIVE }, so only items matter.
+function ownedActiveCart(subtotalInCents: number) {
+  return { items: [{ priceInCents: subtotalInCents, quantity: 1 }] };
 }
 
-// Full cart shape read by reserveStockAndCreateOrder inside the tx.
-function txCart(subtotalInCents: number) {
+// Full cart shape read by reserveStockAndCreateOrder inside the tx. Owned by the
+// current customer by default (ownership check passes without a claim).
+function txCart(subtotalInCents: number, customerId: string | null = CUSTOMER_ID) {
   return {
     id: CART_ID,
     status: 'ACTIVE',
+    customerId,
     items: [
       {
         id: 'item-1',
@@ -160,8 +172,8 @@ describe('CheckoutService — authenticated customer flow (11E-alpha)', () => {
 
     // ── Phase 11F-alpha: shipping methods + money breakdown ──────────────────
 
-    it('returns STANDARD and EXPRESS priced against the cart subtotal (below free)', async () => {
-      mock.cart.findUnique.mockResolvedValue(activeCart(5500));
+    it('returns STANDARD and EXPRESS priced against the OWN cart subtotal (below free)', async () => {
+      mock.cart.findFirst.mockResolvedValue(ownedActiveCart(5500));
       const state = await service.getCustomerCheckout(CUSTOMER_ID, CART_ID);
 
       expect(state.shippingMethods.map((m) => m.code)).toEqual(['STANDARD', 'EXPRESS']);
@@ -175,7 +187,7 @@ describe('CheckoutService — authenticated customer flow (11E-alpha)', () => {
     });
 
     it('applies free STANDARD shipping at/above the threshold (EXPRESS stays paid)', async () => {
-      mock.cart.findUnique.mockResolvedValue(activeCart(8000));
+      mock.cart.findFirst.mockResolvedValue(ownedActiveCart(8000));
       const state = await service.getCustomerCheckout(CUSTOMER_ID, CART_ID);
 
       expect(state.shippingMethods.find((m) => m.code === 'STANDARD')?.priceInCents).toBe(0);
@@ -184,15 +196,44 @@ describe('CheckoutService — authenticated customer flow (11E-alpha)', () => {
       expect(state.totalInCents).toBe(8000); // free standard
     });
 
-    it('prices against subtotal 0 when no cartId is provided', async () => {
+    it('prices against subtotal 0 when no cartId is provided (no cart access)', async () => {
       const state = await service.getCustomerCheckout(CUSTOMER_ID);
       expect(state.subtotalInCents).toBe(0);
       expect(state.shippingMethods.find((m) => m.code === 'STANDARD')?.priceInCents).toBe(495);
-      expect(mock.cart.findUnique).not.toHaveBeenCalled();
+      expect(mock.cart.updateMany).not.toHaveBeenCalled();
+      expect(mock.cart.findFirst).not.toHaveBeenCalled();
     });
 
-    it('treats a non-ACTIVE cart as empty (subtotal 0)', async () => {
-      mock.cart.findUnique.mockResolvedValue({ status: 'CONVERTED', items: [{ priceInCents: 9000, quantity: 1 }] });
+    // ── Phase 11F-beta: cart ownership on GET ────────────────────────────────
+
+    it('claims an unclaimed cart for the customer (atomic, null-guarded)', async () => {
+      mock.cart.findFirst.mockResolvedValue(ownedActiveCart(5500));
+      await service.getCustomerCheckout(CUSTOMER_ID, CART_ID);
+
+      expect(mock.cart.updateMany).toHaveBeenCalledWith({
+        where: { id: CART_ID, customerId: null, status: 'ACTIVE' },
+        data: { customerId: CUSTOMER_ID },
+      });
+      // The owned-read is scoped to this customer.
+      const readWhere = mock.cart.findFirst.mock.calls[0][0].where as Record<string, unknown>;
+      expect(readWhere.id).toBe(CART_ID);
+      expect(readWhere.customerId).toBe(CUSTOMER_ID);
+      expect(readWhere.status).toBe('ACTIVE');
+    });
+
+    it('does not leak the subtotal/shipping of a cart owned by another customer', async () => {
+      // Claim no-ops (foreign cart is not null-owned) and the owned-read misses.
+      mock.cart.updateMany.mockResolvedValue({ count: 0 });
+      mock.cart.findFirst.mockResolvedValue(null);
+
+      const state = await service.getCustomerCheckout(CUSTOMER_ID, CART_ID);
+      expect(state.subtotalInCents).toBe(0);
+      // No free shipping revealed — priced as an empty cart (STANDARD paid).
+      expect(state.shippingMethods.find((m) => m.code === 'STANDARD')?.priceInCents).toBe(495);
+    });
+
+    it('treats a non-ACTIVE / missing cart as empty (subtotal 0)', async () => {
+      mock.cart.findFirst.mockResolvedValue(null); // status:ACTIVE filter excludes it
       const state = await service.getCustomerCheckout(CUSTOMER_ID, CART_ID);
       expect(state.subtotalInCents).toBe(0);
     });
@@ -436,6 +477,62 @@ describe('CheckoutService — authenticated customer flow (11E-alpha)', () => {
       ).rejects.toThrow('El método de envío seleccionado no es válido.');
       expect(mock.__tx.order.create).not.toHaveBeenCalled();
       expect(mock.__tx.inventory.update).not.toHaveBeenCalled();
+    });
+
+    // ── Phase 11F-beta: cart ownership on POST ───────────────────────────────
+
+    it('rejects creating an order from a cart owned by another customer (404, no order)', async () => {
+      wireOrderCreation(mock);
+      mock.__tx.cart.findUnique.mockResolvedValue(txCart(1000, 'other-customer'));
+      mock.customerAddress.findFirst.mockResolvedValueOnce(ownedAddress({ id: 'addr-both', type: 'BOTH' }));
+
+      await expect(
+        service.startCustomerCheckout(CUSTOMER_ID, EMAIL, {
+          cartId: CART_ID,
+          shippingAddressId: 'addr-both',
+          useShippingAsBilling: true,
+        }),
+      ).rejects.toThrow(NotFoundException);
+      // No stock reserved, no order created, no claim performed on a foreign cart.
+      expect(mock.__tx.order.create).not.toHaveBeenCalled();
+      expect(mock.__tx.inventory.update).not.toHaveBeenCalled();
+    });
+
+    it('claims an unclaimed cart for the customer and creates the order', async () => {
+      wireOrderCreation(mock);
+      mock.__tx.cart.findUnique.mockResolvedValue(txCart(1000, null)); // unclaimed
+      mock.customerAddress.findFirst.mockResolvedValueOnce(ownedAddress({ id: 'addr-both', type: 'BOTH' }));
+
+      await service.startCustomerCheckout(CUSTOMER_ID, EMAIL, {
+        cartId: CART_ID,
+        shippingAddressId: 'addr-both',
+        useShippingAsBilling: true,
+      });
+
+      expect(mock.__tx.cart.update).toHaveBeenCalledWith({
+        where: { id: CART_ID },
+        data: { customerId: CUSTOMER_ID },
+      });
+      expect(mock.__tx.order.create).toHaveBeenCalled();
+      expect(orderCreateData(mock).customerId).toBe(CUSTOMER_ID);
+    });
+
+    it('does not re-claim a cart already owned by the customer', async () => {
+      wireOrderCreation(mock); // VALID_CART.customerId === CUSTOMER_ID
+      mock.customerAddress.findFirst.mockResolvedValueOnce(ownedAddress({ id: 'addr-both', type: 'BOTH' }));
+
+      await service.startCustomerCheckout(CUSTOMER_ID, EMAIL, {
+        cartId: CART_ID,
+        shippingAddressId: 'addr-both',
+        useShippingAsBilling: true,
+      });
+
+      // The only cart.update is the CONVERTED status change — never a customerId claim.
+      const claimCalls = mock.__tx.cart.update.mock.calls.filter(
+        (c) => (c[0].data as Record<string, unknown>).customerId !== undefined,
+      );
+      expect(claimCalls).toHaveLength(0);
+      expect(mock.__tx.order.create).toHaveBeenCalled();
     });
   });
 });

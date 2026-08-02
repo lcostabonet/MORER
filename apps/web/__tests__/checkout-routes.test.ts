@@ -78,6 +78,25 @@ describe('GET /api/checkout', () => {
     const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
     expect(url).toContain('/checkout/customer?cartId=cart-123');
   });
+
+  it('forwards ONLY cartId — extra client query params are ignored (ownership at API)', async () => {
+    vi.mocked(fetch).mockResolvedValueOnce(
+      makeFetchResponse(200, { shippingAddresses: [], billingAddresses: [], shippingMethods: [] }),
+    );
+    await mod.GET(
+      makeRequest(
+        'GET',
+        '/api/checkout?cartId=cart-123&customerId=evil&subtotalInCents=999999',
+        undefined,
+        { [COOKIE_NAME]: 'tok' },
+      ),
+    );
+    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toContain('cartId=cart-123');
+    expect(url).not.toContain('customerId');
+    expect(url).not.toContain('subtotalInCents');
+    expect(url).not.toContain('evil');
+  });
 });
 
 // ─── POST /api/checkout/orders ────────────────────────────────────────────────

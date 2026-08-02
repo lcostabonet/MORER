@@ -265,9 +265,10 @@ export class CheckoutService {
     const shippingAddresses = addresses.filter((a) => canBeShipping(a.type as CustomerAddressType));
     const billingAddresses = addresses.filter((a) => canBeBilling(a.type as CustomerAddressType));
 
-    // Shipping methods are priced against the REAL cart subtotal (backend source
-    // of truth). Preliminary total uses the default method (STANDARD).
-    const subtotalInCents = await this.computeCartSubtotal(cartId);
+    // Shipping methods are priced against the customer's OWN cart subtotal
+    // (backend source of truth, ownership-enforced). Preliminary total uses the
+    // default method (STANDARD).
+    const subtotalInCents = await this.computeCartSubtotal(customerId, cartId);
     const shippingMethods = getAvailableShippingMethods(subtotalInCents);
     const defaultMethod = resolveShippingMethod(DEFAULT_SHIPPING_METHOD_CODE, subtotalInCents);
     const taxInCents = 0;
@@ -285,16 +286,31 @@ export class CheckoutService {
     };
   }
 
-  // Best-effort subtotal from an ACTIVE cart, for pricing shipping in the GET.
-  // Returns 0 for a missing/invalid/inactive/empty cart — the POST re-validates
-  // and re-prices authoritatively, so this only affects preliminary display.
-  private async computeCartSubtotal(cartId?: string): Promise<number> {
+  // Best-effort subtotal from the customer's OWN ACTIVE cart, for pricing shipping
+  // in the GET. Ownership (Phase 11F-beta): the cart must belong to this customer.
+  //
+  // The cart is session-based (its id comes from the client's localStorage), so
+  // possession of the cartId is the proof of ownership. We bind an unclaimed cart
+  // to the customer on first authenticated access (trust-on-first-use); once bound,
+  // no other customer can read it. A cart owned by a DIFFERENT customer returns 0 —
+  // never leaking another customer's subtotal / shipping availability. Missing /
+  // invalid / inactive / empty carts also return 0. The POST re-validates
+  // ownership authoritatively, so this only affects preliminary display.
+  private async computeCartSubtotal(customerId: string, cartId?: string): Promise<number> {
     if (!cartId || !UUID_REGEX.test(cartId)) return 0;
-    const cart = await this.prisma.cart.findUnique({
-      where: { id: cartId },
-      select: { status: true, items: { select: { priceInCents: true, quantity: true } } },
+
+    // Claim the cart for this customer only if it is still unclaimed (atomic).
+    await this.prisma.cart.updateMany({
+      where: { id: cartId, customerId: null, status: CartStatus.ACTIVE },
+      data: { customerId },
     });
-    if (!cart || cart.status !== CartStatus.ACTIVE) return 0;
+
+    // Read ONLY if the cart is now owned by this customer — no cross-customer leak.
+    const cart = await this.prisma.cart.findFirst({
+      where: { id: cartId, customerId, status: CartStatus.ACTIVE },
+      select: { items: { select: { priceInCents: true, quantity: true } } },
+    });
+    if (!cart) return 0;
     return cart.items.reduce((sum, item) => sum + item.priceInCents * item.quantity, 0);
   }
 
@@ -354,6 +370,8 @@ export class CheckoutService {
             // Re-priced against the authoritative subtotal computed in the tx.
             resolveShipping: (subtotalInCents) =>
               resolveShippingMethod(methodCode, subtotalInCents),
+            // Enforce that the cart belongs to (or is claimable by) this customer.
+            ownerCustomerId: customerId,
           }),
         { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
       ),
@@ -431,6 +449,10 @@ export class CheckoutService {
       // Prices the chosen shipping method against the authoritative cart subtotal.
       // Absent for the guest flow → no shipping cost, no method (legacy behaviour).
       resolveShipping?: (subtotalInCents: number) => ShippingMethodOption;
+      // Phase 11F-beta: enforce cart ownership for the authenticated flow. When set,
+      // the cart must belong to (or be claimable by) this customer. Absent for the
+      // guest flow, which keeps its existing session-based contract.
+      ownerCustomerId?: string;
     },
   ): Promise<RawOrder> {
     const cart = await tx.cart.findUnique({
@@ -439,6 +461,25 @@ export class CheckoutService {
     });
 
     if (!cart) throw new NotFoundException('Cart not found');
+
+    // Ownership enforcement for the authenticated flow (Phase 11F-beta). Checked
+    // BEFORE status/emptiness so a foreign cart never reveals any of its state.
+    // A cart owned by another customer returns 404 (indistinguishable from a
+    // missing cart — no existence disclosure). An unclaimed cart is bound to this
+    // customer (trust-on-first-use).
+    if (opts.ownerCustomerId) {
+      const cartCustomerId = (cart as { customerId: string | null }).customerId;
+      if (cartCustomerId && cartCustomerId !== opts.ownerCustomerId) {
+        throw new NotFoundException('Cart not found');
+      }
+      if (!cartCustomerId) {
+        await tx.cart.update({
+          where: { id: opts.cartId },
+          data: { customerId: opts.ownerCustomerId },
+        });
+      }
+    }
+
     if (cart.status !== CartStatus.ACTIVE) {
       throw new BadRequestException(
         'Cart is not active. It may have been converted or expired.',

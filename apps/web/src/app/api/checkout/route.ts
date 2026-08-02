@@ -10,8 +10,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: SESSION_EXPIRED }, { status: 401 });
   }
 
-  // Forward only the cartId (used by the backend to price shipping). Validated
-  // and re-priced server-side; nothing about pricing is trusted from here.
+  // Forward only the cartId. The cart's id derives from the client's localStorage
+  // session (not a server-readable cookie), so it cannot be derived here; instead
+  // the API enforces cart OWNERSHIP against the authenticated customer (Phase
+  // 11F-beta) and re-prices server-side. No pricing/ownership is trusted from the
+  // client. Any other query param the client adds is ignored (only cartId is read).
   const cartId = request.nextUrl.searchParams.get('cartId');
   const query = cartId ? `?cartId=${encodeURIComponent(cartId)}` : '';
 
