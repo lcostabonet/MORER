@@ -13,9 +13,11 @@ export interface CartItemResponse {
   isAvailable: boolean;
 }
 
+// The client-facing cart shape returned by the BFF. sessionId is intentionally
+// absent: it equals the httpOnly cart-session cookie and must never reach the
+// client (the BFF strips it via toClientCart).
 export interface CartResponse {
   id: string;
-  sessionId: string | null;
   status: string;
   items: CartItemResponse[];
   subtotalInCents: number;

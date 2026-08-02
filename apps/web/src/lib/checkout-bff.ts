@@ -4,11 +4,10 @@ export const SESSION_EXPIRED = 'Tu sesión ha caducado. Vuelve a iniciar sesión
 export const GENERIC_ERROR =
   'No se ha podido procesar la solicitud. Inténtalo de nuevo.';
 
-// The only fields the client may set. customerId and any full address data /
-// unknown property are dropped. cartId is the cart identifier (as in the guest
-// contract); the address selection is by id only.
+// The only fields the client may set. customerId, prices, and — since Phase
+// 11G-alpha — cartId are all dropped: the cart is derived server-side from the
+// httpOnly session cookie, never from the client. Address selection is by id only.
 const CHECKOUT_FIELDS = [
-  'cartId',
   'shippingAddressId',
   'billingAddressId',
   'useShippingAsBilling',

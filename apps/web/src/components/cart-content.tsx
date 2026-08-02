@@ -2,8 +2,7 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import Link from 'next/link';
-import { getOrCreateSessionId } from '@/lib/session';
-import { getCartBySession, updateCartItem, removeCartItem } from '@/lib/cart-api';
+import { getCart, updateCartItem, removeCartItem } from '@/lib/cart-api';
 import { CheckoutCta } from './checkout-cta';
 import type { CartResponse } from '@/types/cart';
 import { CartItemRow } from './cart-item-row';
@@ -20,12 +19,7 @@ export function CartContent({ isAuthenticated }: { isAuthenticated: boolean }) {
     setState('loading');
     setErrorMsg(null);
     try {
-      const sessionId = getOrCreateSessionId();
-      if (!sessionId) {
-        setState('empty');
-        return;
-      }
-      const data = await getCartBySession(sessionId);
+      const data = await getCart();
       if (!data || data.items.length === 0) {
         setState('empty');
       } else {
@@ -44,14 +38,14 @@ export function CartContent({ isAuthenticated }: { isAuthenticated: boolean }) {
 
   async function handleUpdate(itemId: string, quantity: number) {
     if (!cart) return;
-    const updated = await updateCartItem(cart.id, itemId, quantity);
+    const updated = await updateCartItem(itemId, quantity);
     setCart(updated);
     if (updated.items.length === 0) setState('empty');
   }
 
   async function handleRemove(itemId: string) {
     if (!cart) return;
-    const updated = await removeCartItem(cart.id, itemId);
+    const updated = await removeCartItem(itemId);
     setCart(updated);
     if (updated.items.length === 0) setState('empty');
   }

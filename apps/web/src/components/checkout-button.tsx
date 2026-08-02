@@ -3,7 +3,6 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { startCheckout } from '@/lib/checkout-api';
-import { clearSessionId } from '@/lib/session';
 
 interface CheckoutButtonProps {
   cartId: string;
@@ -29,8 +28,8 @@ export function CheckoutButton({ cartId }: CheckoutButtonProps) {
     setError(null);
     try {
       const order = await startCheckout(cartId, email.trim());
-      // Cart is now CONVERTED — clear session so next /cart visit starts fresh.
-      clearSessionId();
+      // Cart is now CONVERTED server-side; the next add-to-cart creates a fresh
+      // cart for the same session cookie automatically.
       router.push(`/checkout/orders/${order.id}`);
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al iniciar el checkout');

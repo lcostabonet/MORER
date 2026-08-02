@@ -3,8 +3,7 @@
 import { useCallback, useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
-import { getOrCreateSessionId, clearSessionId } from '@/lib/session';
-import { getCartBySession } from '@/lib/cart-api';
+import { getCart } from '@/lib/cart-api';
 import { Price } from '@/components/price';
 import type {
   CheckoutAddress,
@@ -25,7 +24,6 @@ export function CheckoutClient() {
   const router = useRouter();
 
   const [phase, setPhase] = useState<Phase>('loading');
-  const [cartId, setCartId] = useState<string | null>(null);
   const [state, setState] = useState<CustomerCheckoutState | null>(null);
   const [selectedShippingId, setSelectedShippingId] = useState('');
   const [selectedBillingId, setSelectedBillingId] = useState('');
@@ -38,18 +36,16 @@ export function CheckoutClient() {
     setPhase('loading');
     setError(null);
     try {
-      const sessionId = getOrCreateSessionId();
-      const cart = sessionId ? await getCartBySession(sessionId) : null;
+      // The cart is derived from the httpOnly session cookie (BFF), never a
+      // client-held id. Load it only to detect the empty-cart state.
+      const cart = await getCart();
       if (!cart || cart.items.length === 0) {
         setPhase('empty-cart');
         return;
       }
-      setCartId(cart.id);
 
-      // The cartId lets the backend price shipping against the real subtotal.
-      const res = await fetch(`/api/checkout?cartId=${encodeURIComponent(cart.id)}`, {
-        method: 'GET',
-      });
+      // No cartId is sent — the checkout BFF derives it from the session cookie.
+      const res = await fetch('/api/checkout', { method: 'GET' });
       if (res.status === 401) {
         router.replace('/login?next=/checkout');
         return;
@@ -121,20 +117,20 @@ export function CheckoutClient() {
 
   async function handleSubmit(e: React.SyntheticEvent<HTMLFormElement>) {
     e.preventDefault();
-    if (!cartId || submitting || !canFinalize) return;
+    if (submitting || !canFinalize) return;
 
     const sameForBilling = useShippingAsBilling && shippingIsBoth;
     setSubmitting(true);
     setError(null);
     try {
+      // No cartId is sent — the checkout BFF derives the cart from the session
+      // cookie. Only the shipping method CODE and address ids are sent; never a price.
       const res = await fetch('/api/checkout/orders', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          cartId,
           shippingAddressId: selectedShippingId,
           useShippingAsBilling: sameForBilling,
-          // Only the method CODE — never a price.
           shippingMethodCode,
           ...(sameForBilling ? {} : { billingAddressId: selectedBillingId }),
         }),
@@ -142,7 +138,6 @@ export function CheckoutClient() {
 
       if (res.ok) {
         const order = (await res.json()) as { id: string };
-        clearSessionId();
         router.push(`/checkout/orders/${order.id}`);
         return;
       }

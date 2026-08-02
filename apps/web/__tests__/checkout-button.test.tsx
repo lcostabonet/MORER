@@ -18,18 +18,12 @@ vi.mock('@/lib/checkout-api', () => ({
   startCheckout: (...args: unknown[]) => mockStartCheckout(...args),
 }));
 
-const mockClearSession = vi.fn();
-vi.mock('@/lib/session', () => ({
-  clearSessionId: () => mockClearSession(),
-}));
-
 import { CheckoutButton } from '@/components/checkout-button';
 
 describe('CheckoutButton (legacy guest flow — still intact)', () => {
   beforeEach(() => {
     mockPush.mockReset();
     mockStartCheckout.mockReset();
-    mockClearSession.mockReset();
   });
 
   it('still renders the legacy guest email form', () => {
@@ -49,7 +43,6 @@ describe('CheckoutButton (legacy guest flow — still intact)', () => {
     await waitFor(() =>
       expect(mockStartCheckout).toHaveBeenCalledWith('cart-1', 'guest@example.com'),
     );
-    expect(mockClearSession).toHaveBeenCalled();
     expect(mockPush).toHaveBeenCalledWith('/checkout/orders/order-guest-1');
   });
 });

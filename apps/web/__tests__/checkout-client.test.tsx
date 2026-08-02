@@ -19,15 +19,11 @@ vi.mock('next/link', () => ({
     React.createElement('a', { href }, children),
 }));
 
+// Phase 11G-alpha: the cart is loaded via the cookie-based BFF (getCart takes no
+// sessionId); there is no localStorage session module anymore.
 const mockGetCart = vi.fn();
 vi.mock('@/lib/cart-api', () => ({
-  getCartBySession: (...args: unknown[]) => mockGetCart(...args),
-}));
-
-const mockClearSession = vi.fn();
-vi.mock('@/lib/session', () => ({
-  getOrCreateSessionId: () => 'sess-1',
-  clearSessionId: () => mockClearSession(),
+  getCart: (...args: unknown[]) => mockGetCart(...args),
 }));
 
 const CART = { id: 'cart-1', items: [{ id: 'i1' }], subtotalInCents: 1000 };
@@ -92,7 +88,6 @@ describe('CheckoutClient', () => {
     mockPush.mockReset();
     mockReplace.mockReset();
     mockGetCart.mockReset();
-    mockClearSession.mockReset();
   });
   afterEach(() => {
     vi.restoreAllMocks();
@@ -146,12 +141,16 @@ describe('CheckoutClient', () => {
     await user.click(screen.getByRole('button', { name: /finalizar compra/i }));
 
     await waitFor(() => expect(mockPush).toHaveBeenCalledWith('/checkout/orders/order-1'));
-    expect(mockClearSession).toHaveBeenCalled();
+
+    // GET checkout carries NO cartId — the BFF derives it from the session cookie.
+    const [getUrl] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(getUrl).toBe('/api/checkout');
 
     const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1] as [string, RequestInit];
     expect(url).toBe('/api/checkout/orders');
     const sent = JSON.parse(String(options.body)) as Record<string, unknown>;
-    expect(sent.cartId).toBe('cart-1');
+    // No cartId is sent — the checkout BFF derives the cart from the cookie.
+    expect(sent).not.toHaveProperty('cartId');
     expect(sent.shippingAddressId).toBe('ship-1');
     expect(sent.billingAddressId).toBe('bill-1');
     expect(sent.useShippingAsBilling).toBe(false);
@@ -218,14 +217,17 @@ describe('CheckoutClient', () => {
 
   // ── Phase 11F-alpha: shipping method section + live summary ──────────────────
 
-  it('requests the checkout with the cartId so the backend can price shipping', async () => {
+  it('requests /api/checkout WITHOUT a cartId (BFF derives it from the cookie)', async () => {
     mockGetCart.mockResolvedValue(CART);
     vi.mocked(fetch).mockResolvedValueOnce(res(200, checkoutState()));
     await renderClient();
     await screen.findByText(/método de envío/i);
 
-    const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
-    expect(url).toBe('/api/checkout?cartId=cart-1');
+    const [url, options] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(url).toBe('/api/checkout');
+    expect(url).not.toContain('cartId');
+    // GET (default) — no client-provided cart identifier anywhere.
+    expect(options?.method ?? 'GET').toBe('GET');
   });
 
   it('shows the shipping method section with standard and express prices', async () => {

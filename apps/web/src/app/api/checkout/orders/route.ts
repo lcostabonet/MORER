@@ -7,8 +7,13 @@ import {
   forwardApiError,
   pickCheckoutPayload,
 } from '@/lib/checkout-bff';
+import { readCartSession, resolveActiveCartId } from '@/lib/cart-session';
 
-// Creates an order for the authenticated customer from their selected addresses.
+const NO_CART = 'No hay un carrito activo para finalizar la compra.';
+
+// Creates an order for the authenticated customer. Phase 11G-alpha: the cartId is
+// derived SERVER-SIDE from the httpOnly session cookie (never from the client
+// body). Only address selection + shipping method CODE are accepted from the body.
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const csrfCheck = checkCsrf(request);
   if (csrfCheck) return csrfCheck;
@@ -25,6 +30,13 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: 'Invalid JSON' }, { status: 400 });
   }
 
+  // Resolve the cart from the httpOnly session cookie — the client cannot choose it.
+  const sessionId = readCartSession(request);
+  const cartId = sessionId ? await resolveActiveCartId(sessionId) : null;
+  if (!cartId) {
+    return NextResponse.json({ error: NO_CART }, { status: 400 });
+  }
+
   let apiRes: Response;
   try {
     apiRes = await fetch(`${getApiUrl()}/checkout/customer/from-cart`, {
@@ -33,8 +45,9 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${token}`,
       },
-      // Only whitelisted checkout fields — never proxy full address data / customerId.
-      body: JSON.stringify(pickCheckoutPayload(body)),
+      // Whitelisted client fields + the server-derived cartId. The client never
+      // supplies cartId/customerId/prices.
+      body: JSON.stringify({ ...pickCheckoutPayload(body), cartId }),
     });
   } catch {
     return NextResponse.json({ error: GENERIC_ERROR }, { status: 503 });

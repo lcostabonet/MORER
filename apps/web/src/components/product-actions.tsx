@@ -3,8 +3,7 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import type { ProductVariant } from '@/types/product';
-import { getOrCreateSessionId } from '@/lib/session';
-import { createOrGetCart, addCartItem } from '@/lib/cart-api';
+import { addToCart } from '@/lib/cart-api';
 import { SizeSelector } from './size-selector';
 
 interface ProductActionsProps {
@@ -29,9 +28,7 @@ export function ProductActions({ variants }: ProductActionsProps) {
     setError(null);
 
     try {
-      const sessionId = getOrCreateSessionId();
-      const cart = await createOrGetCart(sessionId);
-      await addCartItem(cart.id, selectedVariantId, 1);
+      await addToCart(selectedVariantId, 1);
       router.push('/cart');
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Error al añadir al carrito. Inténtalo de nuevo.');
