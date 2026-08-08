@@ -1,21 +1,15 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getApiUrl } from '@/lib/auth';
 import { checkCsrf } from '@/lib/csrf';
-import {
-  resolveCartSessionForWrite,
-  setCartSessionCookie,
-} from '@/lib/cart-session';
+import { resolveExistingCartId, setCartSessionCookie } from '@/lib/cart-session';
 import { CART_GENERIC_ERROR, forwardCartError, pickAddItem, toClientCart } from '@/lib/cart-bff';
 
-// Adds an item to the current session's cart. The cart is bound to the session
-// resolved from the httpOnly cookie; a NEW cart is only ever created with a
-// server-generated id (never a client-chosen / malformed / unknown value). The
-// body may carry only { variantId, quantity }.
+// Adds an item to the current session's cart. Reuses the cookie's ACTIVE cart when
+// present; otherwise the API creates a cart AND generates its session id, which the
+// BFF stores in the httpOnly cookie. The client never supplies a sessionId/cartId.
 export async function POST(request: NextRequest): Promise<NextResponse> {
   const csrf = checkCsrf(request);
   if (csrf) return csrf;
-
-  const { sessionId, existingCartId, isNew } = await resolveCartSessionForWrite(request);
 
   let body: unknown;
   try {
@@ -25,20 +19,23 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
   }
 
   try {
-    // Reuse the session's existing cart, or create one bound to the server-issued id.
-    let cartId = existingCartId;
+    let cartId = await resolveExistingCartId(request);
+    let newSessionId: string | null = null;
+
     if (!cartId) {
+      // POST /cart with NO body — the API generates the session id (11G-beta).
       const cartRes = await fetch(`${getApiUrl()}/cart`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
+        body: JSON.stringify({}),
       });
       if (!cartRes.ok) return await forwardCartError(cartRes);
-      const cart = (await cartRes.json()) as { id?: unknown };
-      if (typeof cart.id !== 'string') {
+      const cart = (await cartRes.json()) as { id?: unknown; sessionId?: unknown };
+      if (typeof cart.id !== 'string' || typeof cart.sessionId !== 'string') {
         return NextResponse.json({ error: CART_GENERIC_ERROR }, { status: 503 });
       }
       cartId = cart.id;
+      newSessionId = cart.sessionId; // server-generated; stored in the cookie below
     }
 
     const addRes = await fetch(`${getApiUrl()}/cart/${cartId}/items`, {
@@ -50,7 +47,8 @@ export async function POST(request: NextRequest): Promise<NextResponse> {
 
     const updated = (await addRes.json()) as unknown;
     const response = NextResponse.json({ cart: toClientCart(updated) }, { status: 200 });
-    if (isNew) setCartSessionCookie(response, sessionId);
+    // Persist the API-generated session id (never sent back to the browser in JSON).
+    if (newSessionId) setCartSessionCookie(response, newSessionId);
     return response;
   } catch {
     return NextResponse.json({ error: CART_GENERIC_ERROR }, { status: 503 });

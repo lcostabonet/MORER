@@ -60,3 +60,46 @@ describe('CartService.findBySessionId — session scoping (11G-alpha)', () => {
     expect(where.sessionId).toBe('sess-B');
   });
 });
+
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+describe('CartService.create — server-generated session id (11G-beta)', () => {
+  let mock: CartMock;
+  let service: CartService;
+
+  beforeEach(() => {
+    mock = makeMock();
+    // Echo the sessionId the service chose so we can assert it.
+    mock.cart.create.mockImplementation((args: { data: { sessionId: string } }) => ({
+      id: 'cart-new',
+      sessionId: args.data.sessionId,
+      status: 'ACTIVE',
+      updatedAt: new Date('2026-01-01T00:00:00.000Z'),
+      items: [],
+    }));
+    service = new CartService(mock as unknown as PrismaService);
+  });
+
+  it('generates a UUID sessionId itself (never read from any input)', async () => {
+    const res = await service.create();
+    const data = mock.cart.create.mock.calls[0][0].data as Record<string, unknown>;
+    expect(data.sessionId).toMatch(UUID_RE);
+    expect(data.status).toBe('ACTIVE');
+    // The service takes NO argument — there is no channel for a caller id.
+    expect(CartService.prototype.create.length).toBe(0);
+    // The generated id is returned (server-to-server) for the BFF to store.
+    expect(res.sessionId).toBe(data.sessionId);
+    // No find-or-create by a supplied session id.
+    expect(mock.cart.findFirst).not.toHaveBeenCalled();
+  });
+
+  it('generates a DISTINCT sessionId on each creation (no fixation/sharing)', async () => {
+    await service.create();
+    await service.create();
+    const a = mock.cart.create.mock.calls[0][0].data.sessionId as string;
+    const b = mock.cart.create.mock.calls[1][0].data.sessionId as string;
+    expect(a).toMatch(UUID_RE);
+    expect(b).toMatch(UUID_RE);
+    expect(a).not.toBe(b);
+  });
+});

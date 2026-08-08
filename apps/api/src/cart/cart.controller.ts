@@ -1,16 +1,30 @@
-import { Body, Controller, Delete, Get, Param, Patch, Post } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  Param,
+  Patch,
+  Post,
+  UsePipes,
+  ValidationPipe,
+} from '@nestjs/common';
 import { CartService } from './cart.service';
 import type { AddItemDto } from './dto/add-item.dto';
-import type { CreateCartDto } from './dto/create-cart.dto';
+import { CreateCartDto } from './dto/create-cart.dto';
 import type { UpdateItemDto } from './dto/update-item.dto';
 
 @Controller('cart')
 export class CartController {
   constructor(private readonly cartService: CartService) {}
 
+  // Route-scoped validation (11G-beta): POST /cart accepts NO fields. Any property
+  // (including a caller-supplied sessionId — even a valid UUID) is rejected with
+  // 400 (forbidNonWhitelisted). The API generates the session id itself.
   @Post()
-  create(@Body() body: CreateCartDto) {
-    return this.cartService.create(body);
+  @UsePipes(new ValidationPipe({ whitelist: true, forbidNonWhitelisted: true }))
+  create(@Body() _body: CreateCartDto) {
+    return this.cartService.create();
   }
 
   // Declared before GET :id to avoid route conflict (static segment 'session' first).

@@ -47,14 +47,23 @@ describe('GET /api/cart', () => {
   });
   afterEach(() => { vi.restoreAllMocks(); vi.resetModules(); });
 
-  it('creates an httpOnly session cookie on first visit and returns no cart', async () => {
+  it('returns { cart: null } and issues NO cookie on a first visit (read-only)', async () => {
     const res = await mod.GET(makeRequest('GET', '/api/cart'));
     expect(res.status).toBe(200);
-    expect(fetch).not.toHaveBeenCalled(); // brand-new session → no cart to fetch
+    expect(fetch).not.toHaveBeenCalled(); // no session → nothing to fetch
     expect((await res.json()).cart).toBeNull();
-    const setCookie = res.headers.get('set-cookie') ?? '';
-    expect(setCookie).toContain(CART_SESSION_COOKIE);
-    expect(setCookie.toLowerCase()).toContain('httponly');
+    // The cookie is created only when the API creates a cart — never on a read.
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  it('treats a malformed cookie as no session (no cart, no fetch, no cookie)', async () => {
+    const res = await mod.GET(
+      makeRequest('GET', '/api/cart', undefined, { [CART_SESSION_COOKIE]: 'session-manipulada-123' }),
+    );
+    expect(res.status).toBe(200);
+    expect(fetch).not.toHaveBeenCalled();
+    expect((await res.json()).cart).toBeNull();
+    expect(res.headers.get('set-cookie')).toBeNull();
   });
 
   it('returns the cart for the existing session cookie WITHOUT leaking sessionId', async () => {
@@ -132,6 +141,110 @@ describe('POST /api/cart/items', () => {
     const res = await mod.POST(makeRequest('POST', '/api/cart/items', { variantId: 'v1', quantity: 99 }, WITH_SESSION));
     expect(res.status).toBe(400);
     expect((await res.json()).error).toContain('Insufficient stock');
+  });
+
+  // ── Phase 11G-beta: the API generates the session id; the BFF stores it ──────
+
+  const API_SESSION = 'a1111111-1111-4111-8111-111111111111';
+  const VALID_UNKNOWN = 'c0000000-0000-4000-8000-0000000000ff';
+
+  // G. No cookie → BFF asks the API to create (empty body) → Set-Cookie(API id).
+  it('creates a cart via the API with an EMPTY body and Set-Cookies the API-generated id', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fetchRes(200, { id: 'new-cart', sessionId: API_SESSION })) // POST /cart {}
+      .mockResolvedValueOnce(fetchRes(200, CART_BODY)); // add item
+    // The client tries to inject a sessionId/cartId — both must be ignored.
+    const req = makeRequest('POST', '/api/cart/items', { variantId: 'v1', quantity: 1, sessionId: 'evil', cartId: 'evil' });
+    const res = await mod.POST(req);
+    expect(res.status).toBe(200);
+
+    const [createUrl, createOpts] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(createUrl).toMatch(/\/cart$/);
+    expect(createOpts.method).toBe('POST');
+    expect(JSON.parse(String(createOpts.body))).toEqual({}); // BFF sends NO id
+    const [addUrl] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1] as [string, RequestInit];
+    expect(addUrl).toContain('/cart/new-cart/items');
+
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain(`${CART_SESSION_COOKIE}=${API_SESSION}`);
+    expect(setCookie.toLowerCase()).toContain('httponly');
+    expect(setCookie).not.toContain('evil');
+    const { cart } = (await res.json()) as { cart: Record<string, unknown> };
+    expect(cart).not.toHaveProperty('sessionId');
+  });
+
+  // H. Malformed cookie → ignored → new cart created via API, cookie replaced.
+  it('ignores a malformed cookie and creates a fresh cart via the API', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fetchRes(200, { id: 'new-cart', sessionId: API_SESSION }))
+      .mockResolvedValueOnce(fetchRes(200, CART_BODY));
+    const req = makeRequest('POST', '/api/cart/items', { variantId: 'v1', quantity: 1 }, { [CART_SESSION_COOKIE]: 'session-manipulada-123' });
+    const res = await mod.POST(req);
+    expect(res.status).toBe(200);
+    // First call is the create (no resolve, since the malformed cookie is rejected).
+    const [createUrl, createOpts] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(createUrl).toMatch(/\/cart$/);
+    expect(JSON.parse(String(createOpts.body))).toEqual({});
+    expect((res.headers.get('set-cookie') ?? '')).toContain(`${CART_SESSION_COOKIE}=${API_SESSION}`);
+  });
+
+  // I. Valid-but-unknown UUID cookie → NOT sent as sessionId; API generates a new one.
+  it('does not adopt a valid-but-unknown UUID cookie; the API generates a different id', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fetchRes(404, {})) // resolve by session → no active cart
+      .mockResolvedValueOnce(fetchRes(200, { id: 'new-cart', sessionId: API_SESSION })) // POST /cart {}
+      .mockResolvedValueOnce(fetchRes(200, CART_BODY)); // add item
+    const req = makeRequest('POST', '/api/cart/items', { variantId: 'v1', quantity: 1 }, { [CART_SESSION_COOKIE]: VALID_UNKNOWN });
+    const res = await mod.POST(req);
+    expect(res.status).toBe(200);
+
+    const [resolveUrl] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string];
+    expect(resolveUrl).toContain(`/cart/session/${VALID_UNKNOWN}`);
+    const [createUrl, createOpts] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1] as [string, RequestInit];
+    expect(createUrl).toMatch(/\/cart$/);
+    expect(JSON.parse(String(createOpts.body))).toEqual({}); // the client's UUID is NOT forwarded
+    // Cookie is replaced with the API id, not the client's chosen UUID.
+    const setCookie = res.headers.get('set-cookie') ?? '';
+    expect(setCookie).toContain(`${CART_SESSION_COOKIE}=${API_SESSION}`);
+    expect(setCookie).not.toContain(VALID_UNKNOWN);
+  });
+
+  // J. Legit ACTIVE cookie → reuse, no create, no rotation.
+  it('reuses a legit ACTIVE cart without creating or rotating the session', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fetchRes(200, { id: CART_ID })) // resolve → active cart
+      .mockResolvedValueOnce(fetchRes(200, CART_BODY)); // add
+    const res = await mod.POST(makeRequest('POST', '/api/cart/items', { variantId: 'v1', quantity: 1 }, WITH_SESSION));
+    expect(res.status).toBe(200);
+    // No POST /cart create call.
+    const createCall = (fetch as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => /\/cart$/.test(c[0] as string) && (c[1] as RequestInit)?.method === 'POST',
+    );
+    expect(createCall).toBeUndefined();
+    // No rotation — the cookie is not re-set.
+    expect(res.headers.get('set-cookie')).toBeNull();
+  });
+
+  // K. Two clients sending the same valid-but-unknown UUID never share a cart.
+  it('two clients with the same invented UUID get distinct API-generated carts', async () => {
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fetchRes(404, {}))
+      .mockResolvedValueOnce(fetchRes(200, { id: 'cart-A', sessionId: 'aaaaaaaa-0000-4000-8000-000000000001' }))
+      .mockResolvedValueOnce(fetchRes(200, CART_BODY));
+    const resA = await mod.POST(makeRequest('POST', '/api/cart/items', { variantId: 'v1', quantity: 1 }, { [CART_SESSION_COOKIE]: VALID_UNKNOWN }));
+    const setA = resA.headers.get('set-cookie') ?? '';
+    vi.restoreAllMocks();
+    vi.stubGlobal('fetch', vi.fn());
+    vi.mocked(fetch)
+      .mockResolvedValueOnce(fetchRes(404, {}))
+      .mockResolvedValueOnce(fetchRes(200, { id: 'cart-B', sessionId: 'bbbbbbbb-0000-4000-8000-000000000002' }))
+      .mockResolvedValueOnce(fetchRes(200, CART_BODY));
+    const resB = await mod.POST(makeRequest('POST', '/api/cart/items', { variantId: 'v1', quantity: 1 }, { [CART_SESSION_COOKIE]: VALID_UNKNOWN }));
+    const setB = resB.headers.get('set-cookie') ?? '';
+
+    expect(setA).toContain('aaaaaaaa-0000-4000-8000-000000000001');
+    expect(setB).toContain('bbbbbbbb-0000-4000-8000-000000000002');
+    expect(setA).not.toBe(setB); // distinct carts → no sharing
   });
 });
 

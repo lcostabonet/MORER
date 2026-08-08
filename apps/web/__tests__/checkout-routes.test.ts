@@ -145,21 +145,19 @@ describe('GET /api/checkout', () => {
     expect(raw).not.toContain('undefined');
   });
 
-  it('creates the cart-session cookie when missing and sends no cartId', async () => {
-    // No cart-session cookie → isNew → no resolve fetch, no cartId forwarded.
+  it('sends no cartId when there is no session cookie, and issues no cookie (read-only)', async () => {
+    // No cart-session cookie → no resolve fetch, no cartId forwarded, no Set-Cookie.
     vi.mocked(fetch).mockResolvedValueOnce(
       makeFetchResponse(200, { shippingAddresses: [], billingAddresses: [], shippingMethods: [] }),
     );
     const res = await mod.GET(makeRequest('GET', '/api/checkout', undefined, { [COOKIE_NAME]: AUTH }));
     expect(res.status).toBe(200);
-    expect(fetch).toHaveBeenCalledTimes(1); // only the checkout call
+    expect(fetch).toHaveBeenCalledTimes(1); // only the checkout call, no cart resolve
     const [url] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
     expect(url).toContain('/checkout/customer');
     expect(url).not.toContain('cartId');
-    // A fresh httpOnly cart-session cookie is set on the response.
-    const setCookie = res.headers.get('set-cookie') ?? '';
-    expect(setCookie).toContain(CART_SESSION_COOKIE);
-    expect(setCookie.toLowerCase()).toContain('httponly');
+    // GET checkout is read-only — the cart-session cookie is created only at cart creation.
+    expect(res.headers.get('set-cookie')).toBeNull();
   });
 
   it('upstream 401 → 401 safe message', async () => {

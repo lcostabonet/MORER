@@ -3,11 +3,11 @@ import {
   Injectable,
   NotFoundException,
 } from '@nestjs/common';
+import { randomUUID } from 'node:crypto';
 import { CartStatus, ProductStatus } from '@morer/database';
 import { PrismaService } from '../database/prisma.service';
 import type { CartItemResponse, CartResponse } from './cart.types';
 import type { AddItemDto } from './dto/add-item.dto';
-import type { CreateCartDto } from './dto/create-cart.dto';
 import type { UpdateItemDto } from './dto/update-item.dto';
 
 // ─── Design decisions ─────────────────────────────────────────────────────────
@@ -89,34 +89,14 @@ export class CartService {
 
   // ─── Create ──────────────────────────────────────────────────────────────────
 
-  async create(dto: CreateCartDto): Promise<CartResponse> {
-    if (dto.sessionId !== undefined && typeof dto.sessionId !== 'string') {
-      throw new BadRequestException('sessionId must be a string');
-    }
-
-    if (dto.sessionId) {
-      const existing = await this.prisma.cart.findFirst({
-        where: { sessionId: dto.sessionId, status: CartStatus.ACTIVE },
-        include: CART_INCLUDE,
-      });
-
-      if (existing) {
-        const raw = existing as unknown as RawCart;
-
-        if (this.isCartExpired(raw)) {
-          // Mark the stale cart as EXPIRED and fall through to create a fresh one.
-          await this.prisma.cart.update({
-            where: { id: raw.id },
-            data: { status: CartStatus.EXPIRED },
-          });
-        } else {
-          return this.mapCart(raw);
-        }
-      }
-    }
-
+  // Phase 11G-beta: the server is the SOLE authority for a cart's session id. A
+  // caller can never choose it — every new cart is bound to a fresh CSPRNG UUID
+  // generated here. The generated id is returned to the (server-to-server) caller
+  // so the BFF can store it in the httpOnly cookie; it is never accepted as input.
+  async create(): Promise<CartResponse> {
+    const sessionId = randomUUID();
     const cart = await this.prisma.cart.create({
-      data: { sessionId: dto.sessionId ?? null, status: CartStatus.ACTIVE },
+      data: { sessionId, status: CartStatus.ACTIVE },
       include: CART_INCLUDE,
     });
 

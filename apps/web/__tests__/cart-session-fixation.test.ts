@@ -1,10 +1,10 @@
 /**
  * Session-fixation reproduction for the httpOnly cart cookie (morer_cart_session).
  *
- * These tests assert the CORRECT behavior: the server is the sole authority for
- * the cart session id. A malformed or client-chosen value must NEVER be adopted
- * as the identifier used to create a cart. Run against the pre-fix code, cases
- * B/C/F FAIL (the arbitrary value is forwarded to POST /cart) — that is the bug.
+ * Phase 11G-beta: the API is the sole authority for a cart's session id. The BFF
+ * NEVER sends a session id when creating a cart — it POSTs /cart with an EMPTY body
+ * and stores the id the API returns. So a malformed / chosen / unknown cookie value
+ * can never be used to create or share a cart.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { NextRequest } from 'next/server';
@@ -31,9 +31,9 @@ function jsonRes(status: number, body: unknown): Response {
 
 type Call = { url: string; method: string; body: Record<string, unknown> | undefined };
 
-// Installs a URL-routed fetch mock modelling the cart API. `existingCart` controls
-// whether GET /cart/session/:id resolves to a cart. Returns the recorded calls.
-function installFetch(existingCart: string | null): Call[] {
+// URL-routed fetch mock. `existingCart` controls GET /cart/session; `apiSessionId`
+// is the id the API "generates" on POST /cart. Returns the recorded calls.
+function installFetch(existingCart: string | null, apiSessionId: string): Call[] {
   const calls: Call[] = [];
   const fn = vi.fn(async (url: string, init?: RequestInit) => {
     const method = init?.method ?? 'GET';
@@ -43,8 +43,8 @@ function installFetch(existingCart: string | null): Call[] {
       return existingCart ? jsonRes(200, { id: existingCart }) : jsonRes(404, {});
     }
     if (method === 'POST' && /\/cart$/.test(url)) {
-      // The API's create-or-get. Echo back the sessionId it was handed.
-      return jsonRes(200, { id: 'created-cart-id', sessionId: body?.sessionId });
+      // The API generates the id itself; it ignores whatever (empty) body arrives.
+      return jsonRes(200, { id: 'created-cart-id', sessionId: apiSessionId });
     }
     if (method === 'POST' && /\/cart\/[^/]+\/items$/.test(url)) {
       return jsonRes(200, { id: 'created-cart-id', items: [{ id: 'i1' }], subtotalInCents: 1000 });
@@ -55,12 +55,9 @@ function installFetch(existingCart: string | null): Call[] {
   return calls;
 }
 
-// The sessionId sent to the create endpoint POST /cart (undefined if none happened).
-function createdWithSessionId(calls: Call[]): unknown {
-  const create = calls.find((c) => c.method === 'POST' && /\/cart$/.test(c.url));
-  return create?.body?.sessionId;
+function createCall(calls: Call[]): Call | undefined {
+  return calls.find((c) => c.method === 'POST' && /\/cart$/.test(c.url));
 }
-
 function setCookieValue(res: Response): string | null {
   const raw = res.headers.get('set-cookie');
   if (!raw) return null;
@@ -68,7 +65,7 @@ function setCookieValue(res: Response): string | null {
   return m ? m[1] : null;
 }
 
-describe('cart session fixation — morer_cart_session', () => {
+describe('cart session fixation — morer_cart_session (11G-beta, API authority)', () => {
   let POST: typeof import('@/app/api/cart/items/route').POST;
 
   beforeEach(async () => {
@@ -79,84 +76,72 @@ describe('cart session fixation — morer_cart_session', () => {
     vi.resetModules();
   });
 
-  // ── A. Cookie ausente ─────────────────────────────────────────────────────
-  it('A: with no cookie, the server generates the session id (UUID) and sets it', async () => {
-    const calls = installFetch(null);
+  // A. No cookie → API creates + issues the id; BFF sends an EMPTY body.
+  it('A: with no cookie, the API generates the id (BFF sends no session id) and it is stored', async () => {
+    const calls = installFetch(null, 'a0000000-0000-4000-8000-00000000000a');
     const res = await POST(makeRequest());
-    expect(res.status).toBe(200); // never 500
-
-    const created = createdWithSessionId(calls);
-    expect(typeof created).toBe('string');
-    expect(created as string).toMatch(UUID_RE);
+    expect(res.status).toBe(200);
+    const create = createCall(calls);
+    expect(create?.body).toEqual({}); // BFF never supplies a session id
     expect(setCookieValue(res)).toMatch(UUID_RE);
+    expect(setCookieValue(res)).toBe('a0000000-0000-4000-8000-00000000000a');
   });
 
-  // ── B. Cookie malformada ──────────────────────────────────────────────────
-  it('B: a malformed cookie is NEVER used to create the cart; server generates a UUID + overwrites', async () => {
-    const calls = installFetch(null);
+  // B. Malformed cookie → ignored; API creates; cookie replaced. Value never sent.
+  it('B: a malformed cookie is never used; the API creates the cart and overwrites the cookie', async () => {
+    const calls = installFetch(null, 'b0000000-0000-4000-8000-00000000000b');
     const res = await POST(makeRequest({ [CART_SESSION_COOKIE]: MALFORMED }));
     expect(res.status).toBe(200);
-
-    // The arbitrary value must not appear in ANY upstream call (session id nor URL).
     for (const c of calls) {
-      expect(c.body?.sessionId).not.toBe(MALFORMED);
+      expect(c.body?.sessionId).toBeUndefined();
       expect(c.url).not.toContain(MALFORMED);
     }
-    // The cart is created with a server-generated UUID.
-    expect(createdWithSessionId(calls)).toMatch(UUID_RE);
-    // Set-Cookie overwrites the invalid value with a valid UUID.
+    expect(createCall(calls)?.body).toEqual({});
     const set = setCookieValue(res);
     expect(set).toMatch(UUID_RE);
     expect(set).not.toBe(MALFORMED);
   });
 
-  // ── C. UUID válido pero desconocido ───────────────────────────────────────
-  it('C: a well-formed but unknown UUID is not adopted; a different UUID is generated', async () => {
-    const calls = installFetch(null); // GET /cart/session → 404 (unknown)
+  // C. Valid-but-unknown UUID → not adopted; API generates a different id.
+  it('C: a well-formed but unknown UUID is not adopted; the API generates a different id', async () => {
+    const calls = installFetch(null, 'c1111111-1111-4111-8111-11111111111c');
     const res = await POST(makeRequest({ [CART_SESSION_COOKIE]: VALID_UNKNOWN }));
     expect(res.status).toBe(200);
-
-    const created = createdWithSessionId(calls) as string;
-    expect(created).toMatch(UUID_RE);
-    expect(created).not.toBe(VALID_UNKNOWN); // server chose a NEW id
+    // The client's UUID is never forwarded as a session id.
+    expect(createCall(calls)?.body).toEqual({});
+    for (const c of calls) expect(c.body?.sessionId).toBeUndefined();
     const set = setCookieValue(res);
     expect(set).toMatch(UUID_RE);
     expect(set).not.toBe(VALID_UNKNOWN);
+    expect(set).toBe('c1111111-1111-4111-8111-11111111111c');
   });
 
-  // ── D. Persistencia legítima ──────────────────────────────────────────────
+  // D. Legit ACTIVE cookie → reuse; no create; no rotation.
   it('D: a server-issued cookie with an existing cart is reused, not rotated', async () => {
     const legit = 'd0000000-0000-4000-8000-0000000000dd';
-    const calls = installFetch('existing-cart-id'); // GET /cart/session → cart exists
+    const calls = installFetch('existing-cart-id', 'unused');
     const res = await POST(makeRequest({ [CART_SESSION_COOKIE]: legit }));
     expect(res.status).toBe(200);
-
-    // No create call — the existing cart is reused.
-    expect(calls.find((c) => c.method === 'POST' && /\/cart$/.test(c.url))).toBeUndefined();
-    // The item is added to the resolved existing cart.
+    expect(createCall(calls)).toBeUndefined(); // reused; no creation
     expect(calls.some((c) => c.url.includes('/cart/existing-cart-id/items'))).toBe(true);
-    // No rotation: the cookie is not re-set.
-    expect(setCookieValue(res)).toBeNull();
+    expect(setCookieValue(res)).toBeNull(); // no rotation
   });
 
-  // ── F. Reutilización del mismo valor MALFORMADO por dos clientes ───────────
-  it('F: two clients sending the same malformed value do NOT share a cart', async () => {
-    const callsA = installFetch(null);
+  // F. Two clients with the same malformed value never share a cart.
+  it('F: two clients sending the same malformed value get distinct API carts', async () => {
+    const callsA = installFetch(null, 'f1111111-1111-4111-8111-11111111111a');
     const resA = await POST(makeRequest({ [CART_SESSION_COOKIE]: MALFORMED }));
-    const idA = createdWithSessionId(callsA) as string;
+    const idA = setCookieValue(resA);
     vi.restoreAllMocks();
 
-    const callsB = installFetch(null);
+    const callsB = installFetch(null, 'f2222222-2222-4222-8222-22222222222b');
     const resB = await POST(makeRequest({ [CART_SESSION_COOKIE]: MALFORMED }));
-    const idB = createdWithSessionId(callsB) as string;
+    const idB = setCookieValue(resB);
 
-    expect(resA.status).toBe(200);
-    expect(resB.status).toBe(200);
+    expect(createCall(callsA)?.body).toEqual({});
+    expect(createCall(callsB)?.body).toEqual({});
     expect(idA).toMatch(UUID_RE);
     expect(idB).toMatch(UUID_RE);
-    // Distinct server-generated ids → not the same cart, no sharing.
-    expect(idA).not.toBe(idB);
-    expect(idA).not.toBe(MALFORMED);
-    expect(idB).not.toBe(MALFORMED);
+    expect(idA).not.toBe(idB); // distinct API-generated ids → no sharing
   });
 });

@@ -1,19 +1,19 @@
 import 'server-only';
-import { randomUUID } from 'node:crypto';
 import type { NextRequest, NextResponse } from 'next/server';
 import { getApiUrl } from './auth';
 
-// Phase 11G-alpha: the cart session lives in an httpOnly cookie (server-managed),
-// NOT in localStorage. The client can no longer read or forge the cart session,
-// and the BFF derives the cart from this cookie for every cart/checkout call.
+// Phase 11G-alpha/beta: the cart session lives in an httpOnly cookie, and the
+// SERVER (the API) is the sole authority that generates the session id. The BFF
+// never mints a session id; it only reads the cookie to RESOLVE an existing cart,
+// and — when a cart must be created — takes the id the API generated and stores it
+// in the cookie. The client can neither read nor choose the cart session.
 
 const isProd = process.env.NODE_ENV === 'production';
 
 export const CART_SESSION_COOKIE = 'morer_cart_session';
 
-// The cart session id is always a server-generated UUID (randomUUID below). Any
-// cookie value that is not a well-formed UUID is a malformed/manipulated value
-// and must be treated as absent — never adopted as an identifier.
+// The cart session id is always a server-generated UUID. Any cookie value that is
+// not a well-formed UUID is malformed/manipulated and must be treated as absent.
 const CART_SESSION_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 const COOKIE_OPTIONS = {
@@ -32,33 +32,7 @@ export function readCartSession(request: NextRequest): string | null {
   return typeof value === 'string' && CART_SESSION_UUID.test(value) ? value : null;
 }
 
-// Returns the cart session id for READ paths, generating a fresh server UUID when
-// the cookie is missing or malformed. `isNew` tells the caller to persist (and
-// thereby overwrite any invalid value) via setCartSessionCookie.
-export function getOrCreateCartSession(request: NextRequest): { sessionId: string; isNew: boolean } {
-  const existing = readCartSession(request);
-  if (existing) return { sessionId: existing, isNew: false };
-  return { sessionId: randomUUID(), isNew: true };
-}
-
-// Returns the session id to bind a cart to on a WRITE (add item). The cookie's
-// session is reused ONLY when it is a valid UUID that already resolves to an
-// ACTIVE cart; otherwise a fresh, cryptographically-random server id is generated
-// (isNew=true → the caller must Set-Cookie). This guarantees the server — never
-// the client — chooses the identifier for a NEW cart, so a chosen / malformed /
-// unknown cookie value can never fixate a session or share a cart between clients.
-export async function resolveCartSessionForWrite(
-  request: NextRequest,
-): Promise<{ sessionId: string; existingCartId: string | null; isNew: boolean }> {
-  const cookieSession = readCartSession(request);
-  if (cookieSession) {
-    const existingCartId = await resolveActiveCartId(cookieSession);
-    if (existingCartId) return { sessionId: cookieSession, existingCartId, isNew: false };
-  }
-  return { sessionId: randomUUID(), existingCartId: null, isNew: true };
-}
-
-// Persists the httpOnly cart session cookie on the outgoing response.
+// Persists the httpOnly cart session cookie (the id the API generated).
 export function setCartSessionCookie(response: NextResponse, sessionId: string): void {
   response.cookies.set(CART_SESSION_COOKIE, sessionId, COOKIE_OPTIONS);
 }
@@ -77,4 +51,12 @@ export async function resolveActiveCartId(sessionId: string): Promise<string | n
   } catch {
     return null;
   }
+}
+
+// Returns the ACTIVE cart id bound to the current session cookie, or null when the
+// cookie is missing/malformed or resolves to no active cart. Never creates or
+// generates anything — creating a cart (and its session id) is the API's job.
+export async function resolveExistingCartId(request: NextRequest): Promise<string | null> {
+  const sessionId = readCartSession(request);
+  return sessionId ? resolveActiveCartId(sessionId) : null;
 }

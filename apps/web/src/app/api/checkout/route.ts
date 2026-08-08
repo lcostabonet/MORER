@@ -1,11 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { getApiUrl, COOKIE_NAME } from '@/lib/auth';
 import { GENERIC_ERROR, SESSION_EXPIRED, forwardApiError, toClientCheckout } from '@/lib/checkout-bff';
-import {
-  getOrCreateCartSession,
-  resolveActiveCartId,
-  setCartSessionCookie,
-} from '@/lib/cart-session';
+import { readCartSession, resolveActiveCartId } from '@/lib/cart-session';
 
 // Returns the authenticated customer's checkout state: addresses, shipping
 // methods priced against the cart subtotal, and the money breakdown (read-only).
@@ -19,8 +15,11 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
     return NextResponse.json({ error: SESSION_EXPIRED }, { status: 401 });
   }
 
-  const { sessionId, isNew } = getOrCreateCartSession(request);
-  const cartId = isNew ? null : await resolveActiveCartId(sessionId);
+  // Derive the cartId from the httpOnly cookie only; never issue a cookie here
+  // (the cookie is created by the API at cart creation). A missing/malformed
+  // cookie or no active cart → no cartId (subtotal 0). Client ?cartId is ignored.
+  const sessionId = readCartSession(request);
+  const cartId = sessionId ? await resolveActiveCartId(sessionId) : null;
   const query = cartId ? `?cartId=${encodeURIComponent(cartId)}` : '';
 
   let apiRes: Response;
@@ -30,20 +29,12 @@ export async function GET(request: NextRequest): Promise<NextResponse> {
       cache: 'no-store',
     });
   } catch {
-    const res = NextResponse.json({ error: GENERIC_ERROR }, { status: 503 });
-    if (isNew) setCartSessionCookie(res, sessionId);
-    return res;
+    return NextResponse.json({ error: GENERIC_ERROR }, { status: 503 });
   }
 
-  if (!apiRes.ok) {
-    const res = await forwardApiError(apiRes);
-    if (isNew) setCartSessionCookie(res, sessionId);
-    return res;
-  }
+  if (!apiRes.ok) return forwardApiError(apiRes);
 
   // Explicit allowlist projection — never forward the upstream object verbatim.
   const data = (await apiRes.json()) as unknown;
-  const res = NextResponse.json(toClientCheckout(data), { status: 200 });
-  if (isNew) setCartSessionCookie(res, sessionId);
-  return res;
+  return NextResponse.json(toClientCheckout(data), { status: 200 });
 }
