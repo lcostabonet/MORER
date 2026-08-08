@@ -82,14 +82,26 @@ export class FulfillmentService {
       );
     }
 
-    await this.prisma.order.update({
-      where: { id: orderId },
+    // Phase 11J — atomic claim: the transition happens in a single conditional write
+    // guarded by `status: PAID`, so under concurrency exactly ONE caller flips
+    // PAID → FULFILLED (count === 1). A racing caller sees count === 0 and returns the
+    // already-fulfilled result without a second effect — no in-memory lock, no double
+    // transition. The DB write commits BEFORE the email (which is idempotent and never
+    // rolls the status back), so a temporary email failure leaves a retryable FULFILLED.
+    const claim = await this.prisma.order.updateMany({
+      where: { id: orderId, status: OrderStatus.PAID },
       data: {
         status: OrderStatus.FULFILLED,
         trackingNumber: dto.trackingNumber.trim(),
         trackingUrl: dto.trackingUrl?.trim() ?? null,
       },
     });
+
+    if (claim.count === 0) {
+      // Lost the race — a concurrent ship already moved the order out of PAID.
+      console.log(`[fulfillment] Order ${orderId} already claimed by a concurrent ship — no second transition`);
+      return { orderId, status: OrderStatus.FULFILLED };
+    }
 
     console.log(`[fulfillment] Order ${orderId} marked as FULFILLED — tracking: ${dto.trackingNumber}`);
 

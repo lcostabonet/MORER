@@ -9,6 +9,7 @@ import { PrismaService } from '../database/prisma.service';
 import type {
   CheckoutAddress,
   CustomerCheckoutState,
+  GuestCheckoutResponse,
   OrderLookupResponse,
   OrderResponse,
 } from './checkout.types';
@@ -16,6 +17,11 @@ import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.
 import type { CustomerCheckoutDto } from './dto/customer-checkout.dto';
 import type { LookupOrderDto } from './dto/lookup-order.dto';
 import { normalizeOrderAddressSnapshot } from './order-address-snapshot';
+import {
+  generateOrderAccessToken,
+  isOrderAccessAuthorized,
+  type OrderAccessCredentials,
+} from './order-access';
 import {
   DEFAULT_SHIPPING_METHOD_CODE,
   INVALID_SHIPPING_METHOD,
@@ -113,6 +119,10 @@ type RawOrder = {
   id: string;
   orderNumber: string;
   status: string;
+  // Ownership fields for authorization (Phase 11H). accessTokenHash is read via a
+  // result cast because the generated Prisma client may be stale (see jwt.strategy).
+  customerId: string;
+  accessTokenHash?: string | null;
   totalInCents: number;
   shippingInCents: number;
   taxInCents: number;
@@ -216,9 +226,14 @@ export class CheckoutService {
 
   // ─── Start checkout ────────────────────────────────────────────────────────
 
-  async startCheckout(dto: CreateCheckoutFromCartDto): Promise<OrderResponse> {
+  async startCheckout(dto: CreateCheckoutFromCartDto): Promise<GuestCheckoutResponse> {
     assertUuid(dto.cartId, 'cartId');
     assertEmail(dto.email);
+
+    // Guest orders cannot be authorized by a JWT (guests have no session), so mint a
+    // high-entropy access capability. Only its SHA-256 hash is persisted; the
+    // plaintext is returned to the BFF ONCE (never stored, never logged).
+    const credential = generateOrderAccessToken();
 
     const order = await this.runWithOrderNumberRetry(() =>
       this.prisma.$transaction(
@@ -226,6 +241,7 @@ export class CheckoutService {
           this.reserveStockAndCreateOrder(tx, {
             cartId: dto.cartId,
             email: dto.email.trim().toLowerCase(),
+            accessTokenHash: credential.hash,
             // Guest flow: create/resolve the anonymous guest Customer inside the tx
             // AFTER cart validation + stock reservation (unchanged behaviour).
             resolveCustomerId: async (t) => {
@@ -242,7 +258,7 @@ export class CheckoutService {
       ),
     );
 
-    return this.mapOrder(order);
+    return { ...this.mapOrder(order), accessToken: credential.token };
   }
 
   // ─── Authenticated checkout from saved addresses (Phase 11E-alpha) ────────────
@@ -453,6 +469,9 @@ export class CheckoutService {
       // the cart must belong to (or be claimable by) this customer. Absent for the
       // guest flow, which keeps its existing session-based contract.
       ownerCustomerId?: string;
+      // Phase 11H: SHA-256 hash of the guest access capability, persisted on the
+      // order. Absent for registered orders (authorized by JWT owner instead).
+      accessTokenHash?: string | null;
     },
   ): Promise<RawOrder> {
     const cart = await tx.cart.findUnique({
@@ -531,38 +550,41 @@ export class CheckoutService {
     const taxInCents = 0;
     const totalInCents = subtotalInCents + shippingInCents + taxInCents;
 
-    const newOrder = await tx.order.create({
-      data: {
-        orderNumber: generateOrderNumber(),
-        customerId,
-        status: OrderStatus.PENDING_PAYMENT,
-        totalInCents,
-        shippingInCents,
-        taxInCents,
-        email: opts.email,
-        ...(shipping
-          ? {
-              shippingMethodCode: shipping.code,
-              shippingMethodName: shipping.name,
-              shippingMethodDescription: shipping.description,
-            }
-          : {}),
-        ...(opts.shippingAddressSnapshot !== undefined
-          ? { shippingAddressSnapshot: opts.shippingAddressSnapshot }
-          : {}),
-        ...(opts.billingAddressSnapshot !== undefined
-          ? { billingAddressSnapshot: opts.billingAddressSnapshot }
-          : {}),
-        items: {
-          create: (cart.items as CartItemWithVariant[]).map((item) => ({
-            variantId: item.variantId,
-            productName: item.variant.product.name,
-            variantSize: item.variant.size,
-            quantity: item.quantity,
-            priceInCents: item.priceInCents, // snapshot from cart, set by backend
-          })),
-        },
+    const orderData: Prisma.OrderUncheckedCreateInput = {
+      orderNumber: generateOrderNumber(),
+      customerId,
+      status: OrderStatus.PENDING_PAYMENT,
+      totalInCents,
+      shippingInCents,
+      taxInCents,
+      email: opts.email,
+      ...(opts.accessTokenHash ? { accessTokenHash: opts.accessTokenHash } : {}),
+      ...(shipping
+        ? {
+            shippingMethodCode: shipping.code,
+            shippingMethodName: shipping.name,
+            shippingMethodDescription: shipping.description,
+          }
+        : {}),
+      ...(opts.shippingAddressSnapshot !== undefined
+        ? { shippingAddressSnapshot: opts.shippingAddressSnapshot }
+        : {}),
+      ...(opts.billingAddressSnapshot !== undefined
+        ? { billingAddressSnapshot: opts.billingAddressSnapshot }
+        : {}),
+      items: {
+        create: (cart.items as CartItemWithVariant[]).map((item) => ({
+          variantId: item.variantId,
+          productName: item.variant.product.name,
+          variantSize: item.variant.size,
+          quantity: item.quantity,
+          priceInCents: item.priceInCents, // snapshot from cart, set by backend
+        })),
       },
+    };
+
+    const newOrder = await tx.order.create({
+      data: orderData,
       include: ORDER_INCLUDE,
     });
 
@@ -575,21 +597,35 @@ export class CheckoutService {
     return newOrder as unknown as RawOrder;
   }
 
+  // ─── Order access authorization (Phase 11H) ─────────────────────────────────
+
+  // Throws a uniform NotFoundException (never 403) unless the caller is the JWT owner
+  // of a registered order or presents a valid guest capability. Unknown order, wrong
+  // token, missing token and foreign order all collapse to the same 404 surface.
+  private assertOrderAccess(
+    order: { customerId: string; accessTokenHash: string | null } | null,
+    cred: OrderAccessCredentials,
+  ): void {
+    if (!order || !isOrderAccessAuthorized(order, cred)) {
+      throw new NotFoundException('Order not found');
+    }
+  }
+
   // ─── Find order ────────────────────────────────────────────────────────────
 
-  async findOrder(orderId: string): Promise<OrderResponse> {
+  async findOrder(orderId: string, cred: OrderAccessCredentials): Promise<OrderResponse> {
     assertUuid(orderId, 'orderId');
     const order = await this.prisma.order.findUnique({
       where: { id: orderId },
       include: ORDER_INCLUDE,
     });
-    if (!order) throw new NotFoundException('Order not found');
+    this.assertOrderAccess(order, cred);
     return this.mapOrder(order as unknown as RawOrder);
   }
 
   // ─── Cancel order ──────────────────────────────────────────────────────────
 
-  async cancelOrder(orderId: string): Promise<OrderResponse> {
+  async cancelOrder(orderId: string, cred: OrderAccessCredentials): Promise<OrderResponse> {
     assertUuid(orderId, 'orderId');
     try {
       const order = await this.prisma.$transaction(
@@ -599,8 +635,11 @@ export class CheckoutService {
             include: ORDER_INCLUDE,
           });
 
-          if (!order) throw new NotFoundException('Order not found');
-          if (order.status !== OrderStatus.PENDING_PAYMENT) {
+          // Authorize BEFORE any state check or mutation. An unauthorized caller
+          // (unknown order, no/invalid JWT, missing/wrong capability, foreign order)
+          // gets a uniform 404 and the reserved stock is never touched.
+          this.assertOrderAccess(order, cred);
+          if (order!.status !== OrderStatus.PENDING_PAYMENT) {
             throw new BadRequestException(
               'Only orders with status pending_payment can be cancelled',
             );
@@ -666,14 +705,35 @@ export class CheckoutService {
 
     const order = await this.prisma.order.findFirst({
       where: { orderNumber, email },
-      select: { id: true },
+      select: { id: true, customerId: true },
     });
 
     if (!order) {
       throw new NotFoundException('No hemos encontrado ningún pedido con esos datos.');
     }
 
-    return { orderId: order.id };
+    // orderNumber + email is the guest ownership proof (throttled at the controller).
+    // Registered orders are authorized by JWT owner, so lookup never mints a
+    // capability for them — it just returns the id (the owner logs in). Guest orders
+    // get a freshly-minted capability (rotating any prior one); only the hash is
+    // stored and only the plaintext returns to the BFF.
+    const customer = await this.prisma.customer.findUnique({
+      where: { id: order.customerId },
+      select: { registeredAt: true, passwordHash: true },
+    });
+    const isRegistered =
+      !!customer && (customer.registeredAt !== null || customer.passwordHash !== null);
+
+    if (isRegistered) {
+      return { orderId: order.id };
+    }
+
+    const credential = generateOrderAccessToken();
+    await this.prisma.order.update({
+      where: { id: order.id },
+      data: { accessTokenHash: credential.hash },
+    });
+    return { orderId: order.id, accessToken: credential.token };
   }
 
   // ─── Private helpers ───────────────────────────────────────────────────────

@@ -12,7 +12,8 @@ import {
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
-import { Throttle, ThrottlerGuard } from '@nestjs/throttler';
+import { Throttle } from '@nestjs/throttler';
+import { ProxyAwareThrottlerGuard } from '../common/proxy-aware-throttler.guard';
 import { AuthService } from './auth.service';
 import { ChangePasswordDto } from './dto/change-password.dto';
 import { ConfirmEmailChangeDto } from './dto/confirm-email-change.dto';
@@ -40,7 +41,7 @@ export class AuthController {
   constructor(private readonly authService: AuthService) {}
 
   @Post('register')
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(ProxyAwareThrottlerGuard)
   @UsePipes(new ValidationPipe({ whitelist: true }))
   register(@Body() body: RegisterDto) {
     return this.authService.register(body);
@@ -48,7 +49,7 @@ export class AuthController {
 
   @Post('login')
   @HttpCode(200)
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(ProxyAwareThrottlerGuard)
   @UsePipes(new ValidationPipe({ whitelist: true }))
   login(@Body() body: LoginDto) {
     return this.authService.login(body);
@@ -92,7 +93,7 @@ export class AuthController {
 
   @Post('forgot-password')
   @HttpCode(200)
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(ProxyAwareThrottlerGuard)
   @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 5 } })
   @UsePipes(new ValidationPipe({ whitelist: true }))
   async forgotPassword(@Body() dto: ForgotPasswordDto) {
@@ -110,7 +111,7 @@ export class AuthController {
 
   @Post('reset-password')
   @HttpCode(200)
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(ProxyAwareThrottlerGuard)
   @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 10 } })
   @UsePipes(new ValidationPipe({ whitelist: true }))
   async resetPassword(@Body() dto: ResetPasswordDto) {
@@ -123,7 +124,7 @@ export class AuthController {
 
   @Post('verify-email')
   @HttpCode(200)
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(ProxyAwareThrottlerGuard)
   @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 10 } })
   @UsePipes(new ValidationPipe({ whitelist: true }))
   async verifyEmail(@Body() dto: VerifyEmailDto) {
@@ -133,7 +134,7 @@ export class AuthController {
 
   @Post('resend-verification')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @UseGuards(JwtAuthGuard, ProxyAwareThrottlerGuard)
   @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 3 } })
   async resendVerification(@Request() req: AuthenticatedRequest) {
     try {
@@ -150,7 +151,7 @@ export class AuthController {
 
   @Post('email-change/request')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @UseGuards(JwtAuthGuard, ProxyAwareThrottlerGuard)
   @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 3 } })
   @UsePipes(new ValidationPipe({ whitelist: true }))
   async requestEmailChange(
@@ -178,7 +179,7 @@ export class AuthController {
 
   @Post('email-change/confirm')
   @HttpCode(200)
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(ProxyAwareThrottlerGuard)
   @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 10 } })
   @UsePipes(new ValidationPipe({ whitelist: true }))
   async confirmEmailChange(@Body() dto: ConfirmEmailChangeDto) {
@@ -188,7 +189,7 @@ export class AuthController {
 
   @Post('password-change')
   @HttpCode(200)
-  @UseGuards(JwtAuthGuard, ThrottlerGuard)
+  @UseGuards(JwtAuthGuard, ProxyAwareThrottlerGuard)
   @Throttle({ default: { ttl: 15 * 60 * 1000, limit: 5 } })
   @UsePipes(new ValidationPipe({ whitelist: true }))
   async changePassword(

@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 import { ThrottlerModule } from '@nestjs/throttler';
+import { AdminModule } from './admin/admin.module';
 import { AuthModule } from './auth';
 import { CartModule } from './cart';
 import { CheckoutModule } from './checkout';
@@ -19,6 +20,7 @@ import { ProductsModule } from './products';
     PaymentsModule,
     FulfillmentModule,
     AuthModule,
+    AdminModule,
     CustomersModule,
   ],
 })

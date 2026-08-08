@@ -1,17 +1,7 @@
-// NEXT_PUBLIC_ variables are baked in at build time by Next.js.
-// Follows the same pattern as cart-api.ts and checkout-api.ts.
-function getPaymentsApiUrl(): string {
-  const url = process.env.NEXT_PUBLIC_API_URL;
-  if (!url && process.env.NODE_ENV === 'production') {
-    throw new Error(
-      '[apps/web] NEXT_PUBLIC_API_URL is required in production. ' +
-        'Set it before running next build.',
-    );
-  }
-  return url ?? 'http://localhost:4000';
-}
-
-const API_URL = getPaymentsApiUrl();
+// Phase 11H: payments go through the same-origin BFF (never the API directly) so the
+// server can attach the order credential (session JWT / guest capability) from
+// httpOnly cookies the browser cannot read. Same-origin fetch sends those cookies
+// automatically; the client only ever sends { orderId } / { orderId, paymentIntentId }.
 
 async function parseError(res: Response, fallback: string): Promise<never> {
   const data = await res.json().catch(() => ({}));
@@ -27,7 +17,7 @@ export interface PaymentIntentResult {
 }
 
 export async function createPaymentIntent(orderId: string): Promise<PaymentIntentResult> {
-  const res = await fetch(`${API_URL}/payments/create-intent`, {
+  const res = await fetch('/api/payments/create-intent', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ orderId }),
@@ -47,7 +37,7 @@ export async function reconcilePayment(
   orderId: string,
   paymentIntentId: string,
 ): Promise<ReconcileResult> {
-  const res = await fetch(`${API_URL}/payments/reconcile`, {
+  const res = await fetch('/api/payments/reconcile', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ orderId, paymentIntentId }),

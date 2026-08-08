@@ -2,6 +2,7 @@ import {
   Body,
   Controller,
   Get,
+  Headers,
   HttpCode,
   Param,
   Post,
@@ -11,10 +12,11 @@ import {
   UsePipes,
   ValidationPipe,
 } from '@nestjs/common';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import { ProxyAwareThrottlerGuard } from '../common/proxy-aware-throttler.guard';
 import { CheckoutService } from './checkout.service';
 import { CustomerCheckoutDto } from './dto/customer-checkout.dto';
 import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import type { CreateCheckoutFromCartDto } from './dto/create-checkout-from-cart.dto';
 import type { LookupOrderDto } from './dto/lookup-order.dto';
 
@@ -26,6 +28,11 @@ interface AuthenticatedRequest {
     lastName: string | null;
     sessionId: string;
   };
+}
+
+// The OptionalJwtAuthGuard leaves `user` undefined for guests (no/invalid token).
+interface OptionalAuthRequest {
+  user?: { id: string };
 }
 
 @Controller('checkout')
@@ -68,18 +75,37 @@ export class CheckoutController {
 
   @Post('orders/lookup')
   @HttpCode(200)
-  @UseGuards(ThrottlerGuard)
+  @UseGuards(ProxyAwareThrottlerGuard)
   lookupOrder(@Body() body: LookupOrderDto) {
     return this.checkoutService.lookupOrder(body);
   }
 
+  // Reading an order requires ownership: the JWT owner (registered orders) or a valid
+  // guest capability (X-Order-Access-Token). Unauthorized callers get a uniform 404.
   @Get('orders/:orderId')
-  findOrder(@Param('orderId') orderId: string) {
-    return this.checkoutService.findOrder(orderId);
+  @UseGuards(OptionalJwtAuthGuard)
+  findOrder(
+    @Param('orderId') orderId: string,
+    @Request() req: OptionalAuthRequest,
+    @Headers('x-order-access-token') accessToken?: string,
+  ) {
+    return this.checkoutService.findOrder(orderId, {
+      userId: req.user?.id,
+      token: accessToken,
+    });
   }
 
+  // Cancelling is a sensitive mutation — same ownership requirement as reading.
   @Post('orders/:orderId/cancel')
-  cancelOrder(@Param('orderId') orderId: string) {
-    return this.checkoutService.cancelOrder(orderId);
+  @UseGuards(OptionalJwtAuthGuard)
+  cancelOrder(
+    @Param('orderId') orderId: string,
+    @Request() req: OptionalAuthRequest,
+    @Headers('x-order-access-token') accessToken?: string,
+  ) {
+    return this.checkoutService.cancelOrder(orderId, {
+      userId: req.user?.id,
+      token: accessToken,
+    });
   }
 }

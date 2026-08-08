@@ -5,9 +5,10 @@ import { useRouter } from 'next/navigation';
 // Phase 11F-alpha fix: the primary cart CTA routes to the registered checkout.
 //   authenticated  → /checkout
 //   anonymous      → /login?next=/checkout
-// The legacy guest email flow (CheckoutButton / POST /checkout/from-cart) is
-// intentionally kept in the codebase but is no longer the primary cart CTA for
-// logged-in users.
+// Phase 11J: the legacy guest email flow (CheckoutButton / web startCheckout) was
+// removed as dead code. The guest checkout still exists at the API layer, but any
+// future web guest flow must go through a BFF that stores the capability in an
+// httpOnly cookie (never returning the token to client JS).
 export function CheckoutCta({ isAuthenticated }: { isAuthenticated: boolean }) {
   const router = useRouter();
 

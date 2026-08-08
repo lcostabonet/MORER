@@ -203,6 +203,12 @@ model Order {
   shippingMethodName        String?
   shippingMethodDescription String?
   email                   String?
+  // Phase 11H (Order authorization): SHA-256 hash of a high-entropy, server-
+  // generated order access capability. The plaintext token is returned ONCE to the
+  // owner and NEVER stored. Registered orders leave this NULL (authorized by JWT
+  // owner); guest orders require the capability. Nullable + unique so legacy orders
+  // stay valid and no two orders can share a hash.
+  accessTokenHash         String?   @unique
   confirmationEmailSentAt DateTime?
   trackingNumber          String?
   trackingUrl             String?
@@ -298,6 +304,11 @@ model AdminUser {
   emailNormalized String    @unique
   name            String
   role            AdminRole @default(SUPPORT)
+  // Phase 11J — real admin authentication (separate from Customer auth). Nullable so
+  // existing rows stay valid; an admin with no passwordHash cannot log in. disabledAt
+  // deactivates an admin without deleting the row (rejected at auth time).
+  passwordHash    String?
+  disabledAt      DateTime?
   createdAt       DateTime  @default(now())
   updatedAt       DateTime  @updatedAt
 

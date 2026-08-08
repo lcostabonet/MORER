@@ -8,6 +8,10 @@ import type { PrismaMock } from './helpers/prisma-mock';
 // legacy null snapshots, and never leak internal fields (customerId/addressId).
 
 const ORDER_ID = 'b2c3d4e5-f6a7-8901-bcde-f12345678901';
+const OWNER_ID = 'owner-1';
+// Phase 11H: findOrder now requires order-access credentials. These fixtures use the
+// registered-owner path (JWT userId === order.customerId).
+const OWNER = { userId: OWNER_ID } as const;
 
 const SHIPPING_SNAPSHOT = {
   fullName: 'Lluís Costa',
@@ -35,6 +39,7 @@ function baseOrder(overrides: Record<string, unknown> = {}) {
   return {
     id: ORDER_ID,
     orderNumber: 'MORER-ABC1-XYZ2',
+    customerId: OWNER_ID,
     status: 'PAID',
     totalInCents: 1000,
     shippingInCents: 0,
@@ -60,13 +65,13 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
 
   it('exposes the shipping address snapshot on the order response', async () => {
     mock.order.findUnique.mockResolvedValue(baseOrder());
-    const result = await service.findOrder(ORDER_ID);
+    const result = await service.findOrder(ORDER_ID, OWNER);
     expect(result.shippingAddress).toEqual(SHIPPING_SNAPSHOT);
   });
 
   it('exposes the billing address snapshot on the order response', async () => {
     mock.order.findUnique.mockResolvedValue(baseOrder());
-    const result = await service.findOrder(ORDER_ID);
+    const result = await service.findOrder(ORDER_ID, OWNER);
     expect(result.billingAddress).toEqual(BILLING_SNAPSHOT);
   });
 
@@ -74,7 +79,7 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
     mock.order.findUnique.mockResolvedValue(
       baseOrder({ shippingAddressSnapshot: null, billingAddressSnapshot: null }),
     );
-    const result = await service.findOrder(ORDER_ID);
+    const result = await service.findOrder(ORDER_ID, OWNER);
     expect(result.shippingAddress).toBeNull();
     expect(result.billingAddress).toBeNull();
   });
@@ -90,7 +95,7 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
         },
       }),
     );
-    const result = await service.findOrder(ORDER_ID);
+    const result = await service.findOrder(ORDER_ID, OWNER);
     expect(result.shippingAddress).toEqual(SHIPPING_SNAPSHOT);
     expect(result.shippingAddress).not.toHaveProperty('addressId');
     expect(result.shippingAddress).not.toHaveProperty('type');
@@ -99,7 +104,8 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
 
   it('never leaks customerId on the order response itself', async () => {
     mock.order.findUnique.mockResolvedValue(baseOrder({ customerId: 'customer-secret' }));
-    const result = await service.findOrder(ORDER_ID);
+    // Authorize as this order's owner so the mapping (not the authz) is under test.
+    const result = await service.findOrder(ORDER_ID, { userId: 'customer-secret' });
     expect(result).not.toHaveProperty('customerId');
   });
 
@@ -107,7 +113,7 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
     mock.order.findUnique.mockResolvedValue(
       baseOrder({ shippingAddressSnapshot: { fullName: 'Only a name' } }),
     );
-    const result = await service.findOrder(ORDER_ID);
+    const result = await service.findOrder(ORDER_ID, OWNER);
     expect(result.shippingAddress).toBeNull();
   });
 
@@ -124,7 +130,7 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
         shippingMethodDescription: '3-5 días laborables',
       }),
     );
-    const r = await service.findOrder(ORDER_ID);
+    const r = await service.findOrder(ORDER_ID, OWNER);
     expect(r.subtotalInCents).toBe(5500); // 5995 - 495 - 0
     expect(r.shippingInCents).toBe(495);
     expect(r.taxInCents).toBe(0);
@@ -147,7 +153,7 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
         shippingMethodDescription: '3-5 días laborables',
       }),
     );
-    const r = await service.findOrder(ORDER_ID);
+    const r = await service.findOrder(ORDER_ID, OWNER);
     expect(r.shippingInCents).toBe(0);
     expect(r.subtotalInCents).toBe(8000);
     expect(r.shippingMethod?.code).toBe('STANDARD');
@@ -164,7 +170,7 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
         shippingMethodDescription: null,
       }),
     );
-    const r = await service.findOrder(ORDER_ID);
+    const r = await service.findOrder(ORDER_ID, OWNER);
     expect(r.shippingMethod).toBeNull();
     expect(r.subtotalInCents).toBe(1200);
   });
@@ -173,7 +179,7 @@ describe('CheckoutService.findOrder — address snapshots (11E-beta)', () => {
     mock.order.findUnique.mockResolvedValue(
       baseOrder({ shippingMethodCode: 'STANDARD', shippingMethodName: null, shippingMethodDescription: null }),
     );
-    const r = await service.findOrder(ORDER_ID);
+    const r = await service.findOrder(ORDER_ID, OWNER);
     expect(r.shippingMethod).toBeNull();
   });
 });

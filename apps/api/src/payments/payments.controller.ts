@@ -7,26 +7,52 @@ import {
   Param,
   Post,
   Req,
+  UseGuards,
 } from '@nestjs/common';
 import type { RawBodyRequest } from '@nestjs/common';
 import type { Request } from 'express';
 import { PaymentsService } from './payments.service';
+import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import type { CreatePaymentIntentDto } from './dto/create-payment-intent.dto';
 import type { ReconcilePaymentDto } from './dto/reconcile-payment.dto';
+
+// The OptionalJwtAuthGuard leaves `user` undefined for guests.
+interface OptionalAuthRequest {
+  user?: { id: string };
+}
 
 @Controller('payments')
 export class PaymentsController {
   constructor(private readonly paymentsService: PaymentsService) {}
 
+  // Every order-scoped payment route is authorized by the JWT owner (registered
+  // order) or a valid guest capability (X-Order-Access-Token). The Stripe webhook is
+  // deliberately excluded — it is authorized by signature, never by user credentials.
   @Post('create-intent')
-  createIntent(@Body() body: CreatePaymentIntentDto) {
-    return this.paymentsService.createPaymentIntent(body);
+  @UseGuards(OptionalJwtAuthGuard)
+  createIntent(
+    @Body() body: CreatePaymentIntentDto,
+    @Req() req: OptionalAuthRequest,
+    @Headers('x-order-access-token') accessToken?: string,
+  ) {
+    return this.paymentsService.createPaymentIntent(body, {
+      userId: req.user?.id,
+      token: accessToken,
+    });
   }
 
   @Post('reconcile')
   @HttpCode(200)
-  reconcile(@Body() body: ReconcilePaymentDto) {
-    return this.paymentsService.reconcilePayment(body);
+  @UseGuards(OptionalJwtAuthGuard)
+  reconcile(
+    @Body() body: ReconcilePaymentDto,
+    @Req() req: OptionalAuthRequest,
+    @Headers('x-order-access-token') accessToken?: string,
+  ) {
+    return this.paymentsService.reconcilePayment(body, {
+      userId: req.user?.id,
+      token: accessToken,
+    });
   }
 
   @Post('webhook/stripe')
@@ -39,7 +65,15 @@ export class PaymentsController {
   }
 
   @Get('order/:orderId')
-  findByOrder(@Param('orderId') orderId: string) {
-    return this.paymentsService.findPaymentsByOrder(orderId);
+  @UseGuards(OptionalJwtAuthGuard)
+  findByOrder(
+    @Param('orderId') orderId: string,
+    @Req() req: OptionalAuthRequest,
+    @Headers('x-order-access-token') accessToken?: string,
+  ) {
+    return this.paymentsService.findPaymentsByOrder(orderId, {
+      userId: req.user?.id,
+      token: accessToken,
+    });
   }
 }

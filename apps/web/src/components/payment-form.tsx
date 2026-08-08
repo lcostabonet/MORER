@@ -80,10 +80,10 @@ export function PaymentForm({ orderId, totalInCents }: PaymentFormProps) {
           '[PaymentForm] createPaymentIntent OK —',
           'PI:', piId,
           '| amount:', amountInCents, currency,
-          '| clientSecret tail:', cs.slice(-6),
         );
         if (!isValidClientSecret(cs)) {
-          console.error('[PaymentForm] clientSecret format invalid:', cs.slice(0, 12));
+          // Never log any portion of the clientSecret.
+          console.error('[PaymentForm] clientSecret format invalid (redacted)');
           setFetchError('El pago no pudo iniciarse correctamente. Por favor, recarga la página.');
           setStatus('error');
           return;

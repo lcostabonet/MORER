@@ -36,6 +36,8 @@ export type PrismaMock = {
   order: {
     findFirst: ReturnType<typeof vi.fn>;
     findUnique: ReturnType<typeof vi.fn>;
+    // Phase 11H: lookupOrder re-mints a guest capability via order.update.
+    update: ReturnType<typeof vi.fn>;
     // Used by EmailService to mark confirmationEmailSentAt after a successful send.
     updateMany: ReturnType<typeof vi.fn>;
   };
@@ -92,6 +94,7 @@ export function createPrismaMock(): PrismaMock {
     order: {
       findFirst: vi.fn(),
       findUnique: vi.fn(),
+      update: vi.fn().mockResolvedValue({}),
       updateMany: vi.fn().mockResolvedValue({ count: 1 }),
     },
     customer: {

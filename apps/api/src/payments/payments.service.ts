@@ -9,6 +9,7 @@ import { OrderStatus, PaymentStatus, Prisma } from '@morer/database';
 import Stripe from 'stripe';
 import { PrismaService } from '../database/prisma.service';
 import { EmailService } from '../email/email.service';
+import { isOrderAccessAuthorized, type OrderAccessCredentials } from '../checkout/order-access';
 import type { CreatePaymentIntentDto } from './dto/create-payment-intent.dto';
 import type { ReconcilePaymentDto } from './dto/reconcile-payment.dto';
 import type {
@@ -56,6 +57,28 @@ export class PaymentsService {
       throw new Error('STRIPE_SECRET_KEY is required for PaymentsModule');
     }
     this.stripe = new Stripe(key);
+  }
+
+  // ─── Order access authorization (Phase 11H) ─────────────────────────────────
+
+  // A payment operation on an order requires ownership: the JWT owner (registered
+  // order) or a valid guest capability (X-Order-Access-Token). Every unauthorized
+  // case — unknown order, no/invalid JWT, missing/wrong capability, foreign order —
+  // collapses to the same NotFoundException so nothing about the order leaks. The
+  // Stripe webhook path never calls this (it is authorized by signature).
+  private assertOrderAccess(
+    order: { customerId: string; accessTokenHash?: string | null } | null,
+    cred: OrderAccessCredentials,
+  ): void {
+    if (
+      !order ||
+      !isOrderAccessAuthorized(
+        { customerId: order.customerId, accessTokenHash: order.accessTokenHash ?? null },
+        cred,
+      )
+    ) {
+      throw new NotFoundException('Order not found');
+    }
   }
 
   // ─── Core transaction: mark Payment SUCCEEDED + Order PAID + decrement stock ─
@@ -107,6 +130,20 @@ export class PaymentsService {
             });
             console.log(`[payments] Payment marked SUCCEEDED (order already PAID): ${stripePaymentIntentId}`);
             return; // applied stays false — order was already settled
+          }
+
+          // Phase 11H — settlement guard (defense in depth): the charged amount and
+          // currency MUST equal the order total before we ever mark it PAID. The
+          // webhook path can create a Payment from PaymentIntent metadata, so this
+          // check ensures a mismatched PaymentIntent never settles an order (mirrors
+          // the reconcile anti-fraud checks). On mismatch we log and stop WITHOUT
+          // marking PAID — never rolled back, never settled.
+          if (payment.amountInCents !== order.totalInCents || payment.currency !== 'eur') {
+            console.error(
+              `[payments] Refusing to settle order ${order.id}: amount/currency mismatch ` +
+                `(payment ${payment.amountInCents} ${payment.currency} != order ${order.totalInCents} eur)`,
+            );
+            return; // applied stays false — a mismatched payment never settles the order
           }
 
           // Decrement stock for each item with explicit guards against negative values.
@@ -169,7 +206,10 @@ export class PaymentsService {
 
   // ─── Create PaymentIntent ──────────────────────────────────────────────────
 
-  async createPaymentIntent(dto: CreatePaymentIntentDto): Promise<CreatePaymentIntentResponse> {
+  async createPaymentIntent(
+    dto: CreatePaymentIntentDto,
+    cred: OrderAccessCredentials,
+  ): Promise<CreatePaymentIntentResponse> {
     console.log('[payments] POST /payments/create-intent — orderId:', dto.orderId);
     assertUuid(dto.orderId, 'orderId');
 
@@ -178,6 +218,9 @@ export class PaymentsService {
     });
 
     if (!order) throw new NotFoundException('Order not found');
+    // Ownership gate BEFORE any status logic, so an unauthorized caller cannot even
+    // learn the order's status or start a PaymentIntent for someone else. Same 404.
+    this.assertOrderAccess(order, cred);
     console.log('[payments] order found — status:', order.status, '| total:', order.totalInCents);
 
     // If the order is already paid, tell the frontend immediately so it can refresh.
@@ -495,7 +538,10 @@ export class PaymentsService {
   // Frontend fallback called immediately after stripe.confirmPayment succeeds.
   // Verifies the PaymentIntent against Stripe as the source of truth before
   // applying any DB changes, so it is safe to call from the browser.
-  async reconcilePayment(dto: ReconcilePaymentDto): Promise<ReconcileResponse> {
+  async reconcilePayment(
+    dto: ReconcilePaymentDto,
+    cred: OrderAccessCredentials,
+  ): Promise<ReconcileResponse> {
     console.log('[payments] POST /payments/reconcile — orderId:', dto.orderId, '| PI:', dto.paymentIntentId);
     assertUuid(dto.orderId, 'orderId');
 
@@ -509,6 +555,9 @@ export class PaymentsService {
 
     const order = await this.prisma.order.findUnique({ where: { id: dto.orderId } });
     if (!order) throw new NotFoundException('Order not found');
+    // Order-access gate first: a caller without the JWT owner / valid capability
+    // cannot reconcile — or probe — an order they do not own (uniform 404).
+    this.assertOrderAccess(order, cred);
 
     // Ownership check runs before the alreadyPaid early return so that passing a PI
     // from another order always yields 400, regardless of the target order's status.
@@ -569,15 +618,17 @@ export class PaymentsService {
 
   // ─── Find payments by order ────────────────────────────────────────────────
 
-  async findPaymentsByOrder(orderId: string): Promise<PaymentResponse[]> {
+  async findPaymentsByOrder(
+    orderId: string,
+    cred: OrderAccessCredentials,
+  ): Promise<PaymentResponse[]> {
     assertUuid(orderId, 'orderId');
 
-    const order = await this.prisma.order.findUnique({
-      where: { id: orderId },
-      select: { id: true },
-    });
+    // Full row (not select:{id}) so ownership fields are available to authorize.
+    const order = await this.prisma.order.findUnique({ where: { id: orderId } });
 
     if (!order) throw new NotFoundException('Order not found');
+    this.assertOrderAccess(order, cred);
 
     const payments = await this.prisma.payment.findMany({
       where: { orderId },

@@ -35,12 +35,14 @@ const VALID_CART = {
   ],
 };
 
-const MOCK_CUSTOMER = { id: 'customer-1' };
+const MOCK_CUSTOMER_ID = 'customer-1';
+const MOCK_CUSTOMER = { id: MOCK_CUSTOMER_ID };
 
 // Shape satisfies the internal RawOrder type used by mapOrder.
 const MOCK_ORDER = {
   id: ORDER_ID,
   orderNumber: ORDER_NUMBER,
+  customerId: MOCK_CUSTOMER_ID,
   status: 'PENDING_PAYMENT',
   totalInCents: 1000,
   shippingInCents: 0,
@@ -191,7 +193,7 @@ describe('CheckoutService.startCheckout (9D-alpha email capture)', () => {
 
       // mapOrder does not expose or access the email field — this verifies that
       // null email does not cause a runtime error in the serialisation layer.
-      const result = await service.findOrder(ORDER_ID);
+      const result = await service.findOrder(ORDER_ID, { userId: MOCK_CUSTOMER_ID });
 
       expect(result.id).toBe(ORDER_ID);
       expect(result).not.toHaveProperty('email');

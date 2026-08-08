@@ -41,8 +41,18 @@ export interface OrderResponse {
   createdAt: Date;
 }
 
+// Guest checkout returns the order plus a ONE-TIME access capability (plaintext).
+// The BFF stores it in an httpOnly cookie and strips it before anything reaches the
+// browser; it is never persisted server-side (only its hash) and never logged.
+export interface GuestCheckoutResponse extends OrderResponse {
+  accessToken: string;
+}
+
 export interface OrderLookupResponse {
   orderId: string;
+  // Present only when a guest order was re-issued a capability during lookup
+  // (email + orderNumber verified). Consumed by the BFF, never exposed to the client.
+  accessToken?: string;
 }
 
 // Public address projection used by the checkout selection UI.

@@ -839,7 +839,7 @@ describe('AuthService', () => {
   // ─── rate limiting / integration ────────────────────────────────────────────
 
   describe('rate limiting / integration', () => {
-    it('register and login routes are decorated with @UseGuards(ThrottlerGuard)', async () => {
+    it('register and login routes are decorated with @UseGuards(ProxyAwareThrottlerGuard)', async () => {
       // This is a code-level structural check. We import the controller metadata
       // reflectively to confirm ThrottlerGuard is applied without spinning up
       // a full NestJS application.
@@ -849,7 +849,7 @@ describe('AuthService', () => {
       // emitDecoratorMetadata, so we fall back to reading the source to confirm
       // the guard is present — the controller file is the authoritative source.
       const { AuthController } = await import('../src/auth/auth.controller');
-      const { ThrottlerGuard } = await import('@nestjs/throttler');
+      const { ProxyAwareThrottlerGuard } = await import('../src/common/proxy-aware-throttler.guard');
 
       const registerGuards: unknown[] =
         Reflect.getMetadata('__guards__', AuthController.prototype.register) ?? [];
@@ -864,12 +864,12 @@ describe('AuthService', () => {
       const hasMetadata = registerGuards.length > 0 || loginGuards.length > 0;
 
       if (hasMetadata) {
-        expect(registerGuards).toContain(ThrottlerGuard);
-        expect(loginGuards).toContain(ThrottlerGuard);
+        expect(registerGuards).toContain(ProxyAwareThrottlerGuard);
+        expect(loginGuards).toContain(ProxyAwareThrottlerGuard);
       } else {
         // Metadata stripped by esbuild — guard presence confirmed by source review:
-        // apps/api/src/auth/auth.controller.ts lines 27 and 35 both carry
-        // @UseGuards(ThrottlerGuard). Structural assertion passes.
+        // apps/api/src/auth/auth.controller.ts both carry
+        // @UseGuards(ProxyAwareThrottlerGuard). Structural assertion passes.
         expect(true).toBe(true);
       }
     });

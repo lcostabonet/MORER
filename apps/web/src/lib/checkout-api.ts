@@ -1,19 +1,10 @@
-import type { OrderResponse } from '@/types/order';
-
-// NEXT_PUBLIC_ variables are baked in at build time by Next.js.
-// Follows the same pattern as cart-api.ts.
-function getCheckoutApiUrl(): string {
-  const url = process.env.NEXT_PUBLIC_API_URL;
-  if (!url && process.env.NODE_ENV === 'production') {
-    throw new Error(
-      '[apps/web] NEXT_PUBLIC_API_URL is required in production. ' +
-        'Set it before running next build.',
-    );
-  }
-  return url ?? 'http://localhost:4000';
-}
-
-const API_URL = getCheckoutApiUrl();
+// Phase 11J: the legacy guest checkout client (startCheckout → POST /checkout/from-cart)
+// was removed. It was unmounted dead code whose API response carries a guest order
+// capability; keeping a browser path that receives that token was an unnecessary risk.
+// The remaining calls go through the same-origin BFF so the server attaches the order
+// credential (session JWT / guest capability) from httpOnly cookies. For lookup, the
+// BFF captures any re-minted capability into an httpOnly cookie and returns only
+// { orderId } — the token never reaches client JS.
 
 async function parseError(res: Response, fallback: string): Promise<never> {
   if (res.status === 429)
@@ -23,29 +14,19 @@ async function parseError(res: Response, fallback: string): Promise<never> {
   throw new Error(Array.isArray(msg) ? msg[0] : (msg ?? fallback));
 }
 
-export async function startCheckout(cartId: string, email: string): Promise<OrderResponse> {
-  const res = await fetch(`${API_URL}/checkout/from-cart`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ cartId, email }),
-  });
-  if (!res.ok) await parseError(res, 'Error al iniciar el checkout');
-  return res.json() as Promise<OrderResponse>;
-}
-
-export async function cancelCheckoutOrder(orderId: string): Promise<OrderResponse> {
-  const res = await fetch(`${API_URL}/checkout/orders/${orderId}/cancel`, {
+export async function cancelCheckoutOrder(orderId: string): Promise<{ status: string }> {
+  const res = await fetch(`/api/checkout/orders/${encodeURIComponent(orderId)}/cancel`, {
     method: 'POST',
   });
   if (!res.ok) await parseError(res, 'Error al cancelar el pedido');
-  return res.json() as Promise<OrderResponse>;
+  return res.json() as Promise<{ status: string }>;
 }
 
 export async function lookupOrder(
   orderNumber: string,
   email: string,
 ): Promise<{ orderId: string }> {
-  const res = await fetch(`${API_URL}/checkout/orders/lookup`, {
+  const res = await fetch('/api/checkout/orders/lookup', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ orderNumber, email }),

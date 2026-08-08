@@ -1,7 +1,9 @@
 import type { Metadata } from 'next';
 import { notFound } from 'next/navigation';
+import { cookies } from 'next/headers';
 import Link from 'next/link';
 import { API_URL } from '@/lib/config';
+import { orderAuthHeaders } from '@/lib/order-access';
 import type { OrderResponse } from '@/types/order';
 import { Price } from '@/components/price';
 import { CancelOrderButton } from '@/components/cancel-order-button';
@@ -11,9 +13,13 @@ import { OrderAddressBlock } from './_components/OrderAddressBlock';
 import { OrderShippingMethodBlock } from './_components/OrderShippingMethodBlock';
 import { OrderMoneySummary } from './_components/OrderMoneySummary';
 
-async function fetchOrder(orderId: string): Promise<OrderResponse> {
+// Phase 11H: the order is fetched server-to-server WITH the caller's credential
+// (session JWT and/or the per-order guest capability, both from httpOnly cookies).
+// Without a valid credential the API returns 404 → notFound(), so no PII renders.
+async function fetchOrder(orderId: string, authHeaders: Record<string, string>): Promise<OrderResponse> {
   const res = await fetch(`${API_URL}/checkout/orders/${orderId}`, {
     cache: 'no-store',
+    headers: authHeaders,
   });
   if (res.status === 404) notFound();
   if (!res.ok) throw new Error('Error al cargar el pedido');
@@ -55,7 +61,8 @@ const STATUS_COLOR: Record<string, string> = {
 export default async function OrderPage({ params, searchParams }: PageProps) {
   const { orderId } = await params;
   const { redirect_status, payment_intent: paymentIntentId } = await searchParams;
-  const order = await fetchOrder(orderId);
+  const cookieStore = await cookies();
+  const order = await fetchOrder(orderId, orderAuthHeaders(cookieStore, orderId));
 
   const isPending = order.status === 'PENDING_PAYMENT';
   const isPaid = order.status === 'PAID';

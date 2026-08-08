@@ -11,7 +11,7 @@ import {
 import type { INestApplication } from '@nestjs/common';
 import { ConflictException, UnauthorizedException } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
-import { ThrottlerGuard } from '@nestjs/throttler';
+import { ProxyAwareThrottlerGuard } from '../src/common/proxy-aware-throttler.guard';
 import { ThrottlerException } from '@nestjs/throttler';
 import { default as supertestDefault } from 'supertest';
 // supertest ships as CJS; vitest ESM interop exposes it as .default.
@@ -81,8 +81,8 @@ async function buildApp(overrideGuards?: {
     providers: [AuthService],
   });
 
-  // Override ThrottlerGuard
-  builder.overrideGuard(ThrottlerGuard).useValue(
+  // Override the (proxy-aware) throttler guard
+  builder.overrideGuard(ProxyAwareThrottlerGuard).useValue(
     overrideGuards?.throttler ?? { canActivate: () => true },
   );
 
