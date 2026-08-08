@@ -93,9 +93,9 @@ describe('POST /api/cart/items', () => {
     expect(fetch).not.toHaveBeenCalled();
   });
 
-  it('ensures the cart and adds only { variantId, quantity } (drops injected cartId/price)', async () => {
+  it('reuses the session cart and adds only { variantId, quantity } (drops injected cartId/price)', async () => {
     vi.mocked(fetch)
-      .mockResolvedValueOnce(fetchRes(200, { id: CART_ID })) // create-or-get cart
+      .mockResolvedValueOnce(fetchRes(200, { id: CART_ID })) // resolve cart by COOKIE session
       .mockResolvedValueOnce(fetchRes(200, CART_BODY)); // add item
     const req = makeRequest('POST', '/api/cart/items', {
       variantId: 'v1',
@@ -107,10 +107,10 @@ describe('POST /api/cart/items', () => {
     const res = await mod.POST(req);
     expect(res.status).toBe(200);
 
-    const [createUrl, createOpts] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
-    expect(createUrl).toContain('/cart');
-    // Cart is created for the COOKIE session, never the client-provided one.
-    expect(JSON.parse(String(createOpts.body)).sessionId).toBe(CART_SESSION);
+    // The cart is resolved by the COOKIE session — never a client-provided value.
+    const [resolveUrl] = (fetch as ReturnType<typeof vi.fn>).mock.calls[0] as [string, RequestInit];
+    expect(resolveUrl).toContain(`/cart/session/${CART_SESSION}`);
+    expect(resolveUrl).not.toContain('evil');
 
     const [addUrl, addOpts] = (fetch as ReturnType<typeof vi.fn>).mock.calls[1] as [string, RequestInit];
     expect(addUrl).toContain(`/cart/${CART_ID}/items`);
