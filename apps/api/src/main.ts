@@ -1,14 +1,10 @@
-import * as path from 'path';
-import * as dotenv from 'dotenv';
+// MUST be the first import: loads .env before AppModule (and its env-reading module
+// config, e.g. JwtModule.register) is evaluated. See load-env.ts for why.
+import './load-env';
 import { NestFactory } from '@nestjs/core';
 import type { NestExpressApplication } from '@nestjs/platform-express';
 import { AppModule } from './app.module';
 import { parseTrustProxy } from './common/client-ip';
-
-// Load .env from the monorepo root before any module is initialised.
-// __dirname is apps/api/src (ts-node) or apps/api/dist (compiled) — both
-// need three levels up to reach the repo root.
-dotenv.config({ path: path.resolve(__dirname, '../../../.env') });
 
 async function bootstrap() {
   const app = await NestFactory.create<NestExpressApplication>(AppModule, { rawBody: true });

@@ -8,7 +8,13 @@
     "start": "node dist/main",
     "lint": "eslint src --ext .ts",
     "typecheck": "tsc --noEmit -p tsconfig.build.json",
-    "test": "vitest run"
+    "test": "vitest run",
+    "admin:create": "ts-node -T scripts/create-admin.ts"
+  },
+  "ts-node": {
+    "compilerOptions": {
+      "module": "CommonJS"
+    }
   },
   "dependencies": {
     "@morer/database": "workspace:*",
