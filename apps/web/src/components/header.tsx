@@ -3,12 +3,17 @@ import { cookies } from 'next/headers';
 import { getCurrentUser } from '@/lib/auth';
 
 export async function Header() {
+  // Read cookies OUTSIDE the try/catch: Next.js signals Dynamic API usage
+  // (cookies()) via internal errors during prerendering. Swallowing them here made
+  // product routes prerender as static and then flip to dynamic at runtime. Only the
+  // API call below may fail and is caught.
+  const cookieStore = await cookies();
+
   let user = null;
   try {
-    const cookieStore = await cookies();
     user = await getCurrentUser(cookieStore);
   } catch {
-    // API unreachable or cookie store unavailable — render unauthenticated header
+    // API unreachable — render the unauthenticated header.
     user = null;
   }
 
